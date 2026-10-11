@@ -7,14 +7,23 @@ on:
         description: "Задание в формате JSON (carousel или reel)"
         required: true
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# GitHub Pages публикует сайт целиком, поэтому задания выполняются по очереди.
 concurrency:
-  group: render-${{ github.run_id }}
+  group: pages
   cancel-in-progress: false
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,19 +35,32 @@ jobs:
           mkdir -p fonts
           curl -fsSL -o fonts/Montserrat.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf" || true
           curl -fsSL -o fonts/Playfair.ttf "https://github.com/google/fonts/raw/main/ofl/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf" || true
-          ls -la fonts
 
-      - name: Render and upload
+      - name: Render
         env:
           JOB: ${{ inputs.job }}
-          OUT_DIR: out
-        run: python render.py
+          OUT_DIR: site
+        run: python render.py --render
 
-      - name: Keep files for 3 days
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
         with:
-          name: result
-          path: out/
-          retention-days: 3
-          if-no-files-found: ignore
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Send links to n8n
+        env:
+          JOB: ${{ inputs.job }}
+          OUT_DIR: site
+          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+        run: python render.py --callback
+
+      - name: Report failure to n8n
+        if: failure()
+        env:
+          JOB: ${{ inputs.job }}
+          FAIL_REASON: "render workflow failed, see GitHub Actions log"
+        run: python render.py --fail
