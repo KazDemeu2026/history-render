@@ -151,26 +151,55 @@ def badge(draw, x, y, brand, size=30):
     draw.text((x, y), "✦ " + brand.upper(), font=f, fill=GOLD)
 
 
+BROWSER_UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
+
+
+def _up_catbox(path):
+    with open(path, "rb") as fh:
+        r = requests.post("https://catbox.moe/user/api.php", data={"reqtype": "fileupload", "userhash": ""},
+                          files={"fileToUpload": (os.path.basename(path), fh)}, headers=BROWSER_UA, timeout=300)
+    url = r.text.strip()
+    if r.ok and url.startswith("https://"):
+        return url
+    raise RuntimeError(f"catbox {r.status_code} {url[:120]}")
+
+
+def _up_tmpfiles(path):
+    with open(path, "rb") as fh:
+        r = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": (os.path.basename(path), fh)},
+                          headers=BROWSER_UA, timeout=300)
+    j = r.json()
+    url = j.get("data", {}).get("url", "")
+    if r.ok and "tmpfiles.org/" in url:
+        url = url.replace("http://", "https://").replace("tmpfiles.org/", "tmpfiles.org/dl/", 1)
+        return url
+    raise RuntimeError(f"tmpfiles {r.status_code} {str(j)[:120]}")
+
+
+def _up_uguu(path):
+    with open(path, "rb") as fh:
+        r = requests.post("https://uguu.se/upload", files={"files[]": (os.path.basename(path), fh)},
+                          headers=BROWSER_UA, timeout=300)
+    j = r.json()
+    files = j.get("files") or []
+    if r.ok and files and files[0].get("url", "").startswith("https://"):
+        return files[0]["url"]
+    raise RuntimeError(f"uguu {r.status_code} {str(j)[:120]}")
+
+
 def upload(path):
-    """Загружает файл на catbox.moe, возвращает прямую ссылку."""
-    last = None
-    for attempt in range(4):
-        try:
-            with open(path, "rb") as fh:
-                r = requests.post(
-                    "https://catbox.moe/user/api.php",
-                    data={"reqtype": "fileupload"},
-                    files={"fileToUpload": (os.path.basename(path), fh)},
-                    timeout=300,
-                )
-            url = r.text.strip()
-            if r.ok and url.startswith("https://"):
+    """Загружает файл на бесплатный хостинг (catbox → tmpfiles → uguu), возвращает прямую ссылку."""
+    errors = []
+    for fn in (_up_catbox, _up_tmpfiles, _up_uguu):
+        for attempt in range(2):
+            try:
+                url = fn(path)
+                print("uploaded", os.path.basename(path), "->", url)
                 return url
-            last = f"{r.status_code} {url[:200]}"
-        except Exception as e:  # noqa: BLE001
-            last = str(e)
-        time.sleep(5 * (attempt + 1))
-    raise RuntimeError("catbox upload failed: " + str(last))
+            except Exception as e:  # noqa: BLE001
+                errors.append(str(e)[:160])
+                time.sleep(3 * (attempt + 1))
+    raise RuntimeError("upload failed: " + " | ".join(errors))
 
 # ---------------------------------------------------------------- карусель
 
