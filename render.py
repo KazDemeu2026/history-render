@@ -146,9 +146,17 @@ def gradient(w, h, top_alpha, bottom_alpha, start=0.0):
     return layer
 
 
+def diamond(draw, cx, cy, r, fill=GOLD):
+    draw.polygon([(cx, cy - r), (cx + r * 0.75, cy), (cx, cy + r), (cx - r * 0.75, cy)], fill=fill)
+
+
 def badge(draw, x, y, brand, size=30):
+    """Фирменная плашка: золотой ромб + название канала."""
     f = font_sans(size, 700)
-    draw.text((x, y), "✦ " + brand.upper(), font=f, fill=GOLD)
+    r = size * 0.36
+    diamond(draw, x + r * 0.75, y + size * 0.62, r)
+    draw.text((x + r * 1.5 + size * 0.45, y), brand.upper(), font=f, fill=GOLD)
+    return x + r * 1.5 + size * 0.45 + draw.textlength(brand.upper(), font=f)
 
 
 BROWSER_UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
@@ -320,8 +328,8 @@ def render_reel(job, out_dir):
     overlay_static.alpha_composite(top, (0, 0))
     od = ImageDraw.Draw(overlay_static)
     bf = font_sans(34, 700)
-    bw = od.textlength("✦ " + brand.upper(), font=bf)
-    od.text(((VW - bw) / 2, 90), "✦ " + brand.upper(), font=bf, fill=GOLD)
+    bw = od.textlength(brand.upper(), font=bf) + 34 * 0.36 * 1.5 + 34 * 0.45
+    badge(od, (VW - bw) / 2, 90, brand, 34)
 
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
     bases = []
@@ -402,32 +410,76 @@ def callback(job, payload):
         time.sleep(5 * (attempt + 1))
 
 
+def safe_id(job):
+    raw = str(job.get("id") or int(time.time()))
+    return "".join(ch for ch in raw if ch.isalnum() or ch in "-_")[:60] or str(int(time.time()))
+
+
+def wait_public(url, timeout=240):
+    """Ждёт, пока файл появится на GitHub Pages (CDN обновляется не мгновенно)."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            r = requests.head(url, timeout=20, allow_redirects=True)
+            if r.status_code == 200:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(8)
+    return False
+
+
 def main():
-    raw = os.environ.get("JOB") or (open(sys.argv[1]).read() if len(sys.argv) > 1 else "")
+    mode = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].startswith("--") else "--render"
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    raw = os.environ.get("JOB") or (open(args[0]).read() if args else "")
     job = json.loads(raw)
-    out_dir = os.environ.get("OUT_DIR") or tempfile.mkdtemp()
-    os.makedirs(out_dir, exist_ok=True)
-    payload = {"id": job.get("id"), "type": job.get("type"), "status": "ok"}
-    try:
-        if job["type"] == "carousel":
-            files = render_carousel(job, out_dir)
-        elif job["type"] == "reel":
-            files = render_reel(job, out_dir)
+    jid = safe_id(job)
+    base_out = os.environ.get("OUT_DIR") or tempfile.mkdtemp()
+    out_dir = os.path.join(base_out, jid)
+
+    if mode == "--fail":
+        callback(job, {"id": job.get("id"), "type": job.get("type"), "status": "error",
+                       "error": os.environ.get("FAIL_REASON", "render workflow failed")})
+        return
+
+    if mode == "--callback":
+        # Файлы уже опубликованы на GitHub Pages: собираем ссылки и сообщаем n8n.
+        page = os.environ["PAGE_URL"].rstrip("/") + "/"
+        files = json.load(open(os.path.join(out_dir, "result.json")))["files"]
+        urls = [page + jid + "/" + os.path.basename(f) for f in files]
+        missing = [u for u in urls if not wait_public(u)]
+        if missing:
+            callback(job, {"id": job.get("id"), "type": job.get("type"), "status": "error",
+                           "error": "files not reachable on Pages: " + ", ".join(missing)[:400]})
+            sys.exit(1)
+        payload = {"id": job.get("id"), "type": job.get("type"), "status": "ok"}
+        if job["type"] == "reel":
+            payload["video_url"] = urls[0]
         else:
-            raise ValueError("unknown type " + str(job.get("type")))
-        if os.environ.get("NO_UPLOAD"):
-            payload["files"] = files
-        else:
-            urls = [upload(p) for p in files]
-            if job["type"] == "reel":
-                payload["video_url"] = urls[0]
-            else:
-                payload["image_urls"] = urls
-    except Exception as e:  # noqa: BLE001
-        payload = {"id": job.get("id"), "type": job.get("type"), "status": "error", "error": str(e)[:500]}
+            payload["image_urls"] = urls
         callback(job, payload)
-        raise
-    callback(job, payload)
+        return
+
+    # --render
+    os.makedirs(out_dir, exist_ok=True)
+    if job["type"] == "carousel":
+        files = render_carousel(job, out_dir)
+    elif job["type"] == "reel":
+        files = render_reel(job, out_dir)
+    else:
+        raise ValueError("unknown type " + str(job.get("type")))
+    with open(os.path.join(out_dir, "result.json"), "w") as fh:
+        json.dump({"files": [os.path.basename(f) for f in files]}, fh)
+    print("RENDERED", jid, [os.path.basename(f) for f in files])
+    if os.environ.get("UPLOAD_MODE") == "hosting":
+        payload = {"id": job.get("id"), "type": job.get("type"), "status": "ok"}
+        urls = [upload(p) for p in files]
+        if job["type"] == "reel":
+            payload["video_url"] = urls[0]
+        else:
+            payload["image_urls"] = urls
+        callback(job, payload)
 
 
 if __name__ == "__main__":
