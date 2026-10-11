@@ -1,0 +1,44 @@
+name: render
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Задание в формате JSON (carousel или reel)"
+        required: true
+
+concurrency:
+  group: render-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools and fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
+          pip install -q pillow requests
+          mkdir -p fonts
+          curl -fsSL -o fonts/Montserrat.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf" || true
+          curl -fsSL -o fonts/Playfair.ttf "https://github.com/google/fonts/raw/main/ofl/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf" || true
+          ls -la fonts
+
+      - name: Render and upload
+        env:
+          JOB: ${{ inputs.job }}
+          OUT_DIR: out
+        run: python render.py
+
+      - name: Keep files for 3 days
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result
+          path: out/
+          retention-days: 3
+          if-no-files-found: ignore
