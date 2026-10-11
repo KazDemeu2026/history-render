@@ -65,11 +65,14 @@ def font_sans(size, weight=800):
 
 # ---------------------------------------------------------------- утилиты
 
+UA = {"User-Agent": "HistoryRender/1.0 (https://github.com/KazDemeu2026/history-render) python-requests"}
+
+
 def load_image(src):
     if src.startswith("http"):
         for attempt in range(4):
             try:
-                r = requests.get(src, timeout=60)
+                r = requests.get(src, timeout=60, headers=UA)
                 r.raise_for_status()
                 return Image.open(io.BytesIO(r.content)).convert("RGB")
             except Exception:
@@ -82,7 +85,7 @@ def load_image(src):
 def download(src, dst):
     if not src.startswith("http"):
         return src
-    r = requests.get(src, timeout=120)
+    r = requests.get(src, timeout=120, headers=UA)
     r.raise_for_status()
     with open(dst, "wb") as fh:
         fh.write(r.content)
