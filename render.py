@@ -3,7 +3,8 @@
 
 Получает задание (JSON) из переменной окружения JOB или из файла (аргумент),
 делает карусель (JPEG 1080x1350) или Reels (MP4 1080x1920 со звуком и субтитрами),
-загружает результат на catbox.moe и отправляет ответ на callback_url (n8n).
+публикует результат на GitHub Pages и отправляет ссылки на callback_url (n8n).
+Витрина последних материалов: https://kazdemeu2026.github.io/history-render/
 
 Формат задания:
 {
@@ -429,6 +430,68 @@ def wait_public(url, timeout=240):
     return False
 
 
+# ---------------------------------------------------------------- витрина
+
+KEEP_HOURS = 72
+
+
+def carry_over(base_out, jid):
+    """GitHub Pages публикует сайт целиком. Чтобы прошлые ролики и карусели
+    не пропадали (Instagram скачивает видео не сразу, а вы можете посмотреть
+    превью), переносим в новый сайт всё, что опубликовано за последние KEEP_HOURS."""
+    base = (os.environ.get("SITE_BASE") or "").rstrip("/") + "/"
+    if base == "/":
+        return []
+    try:
+        r = requests.get(base + "manifest.json", timeout=30)
+        items = r.json().get("items", []) if r.status_code == 200 else []
+    except Exception as e:  # noqa: BLE001
+        print("manifest not loaded:", e)
+        items = []
+    keep, now = [], time.time()
+    for it in items:
+        iid = it.get("id")
+        if not iid or iid == jid or now - float(it.get("ts", 0)) > KEEP_HOURS * 3600:
+            continue
+        d = os.path.join(base_out, iid)
+        os.makedirs(d, exist_ok=True)
+        try:
+            for f in it.get("files", []):
+                rr = requests.get(base + iid + "/" + f, timeout=180)
+                rr.raise_for_status()
+                with open(os.path.join(d, f), "wb") as fh:
+                    fh.write(rr.content)
+            keep.append(it)
+        except Exception as e:  # noqa: BLE001
+            print("skip old item", iid, e)
+    print("carried over:", [k["id"] for k in keep])
+    return keep
+
+
+def write_showcase(base_out, items):
+    with open(os.path.join(base_out, "manifest.json"), "w") as fh:
+        json.dump({"items": items}, fh, ensure_ascii=False)
+    esc = lambda t: (str(t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    cards = []
+    for it in sorted(items, key=lambda x: -float(x.get("ts", 0))):
+        when = time.strftime("%d.%m %H:%M", time.gmtime(float(it.get("ts", 0)) + 5 * 3600))
+        kind = "Reels" if it.get("type") == "reel" else "Карусель"
+        if it.get("type") == "reel":
+            media = "".join('<video controls preload="metadata" src="%s/%s"></video>' % (it["id"], f) for f in it.get("files", []))
+        else:
+            media = "".join('<a href="%s/%s"><img loading="lazy" src="%s/%s"></a>' % (it["id"], f, it["id"], f) for f in it.get("files", []))
+        cards.append('<section><h2>%s · %s</h2><p>%s</p><div class="row">%s</div></section>' % (kind, when, esc(it.get("title")), media))
+    html = """<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Хроники времени — превью</title><style>
+body{margin:0;background:#111;color:#eee;font:16px/1.4 system-ui,sans-serif;padding:16px}
+h1{color:#e9c46a;font-size:22px}h2{font-size:16px;color:#e9c46a;margin:24px 0 4px}p{margin:0 0 8px;color:#bbb}
+.row{display:flex;gap:8px;overflow-x:auto;padding-bottom:8px}.row img{height:320px;border-radius:6px}
+.row video{height:480px;border-radius:6px;background:#000}</style></head><body>
+<h1>Хроники времени — что подготовлено за последние дни</h1>""" + "".join(cards) + "</body></html>"
+    with open(os.path.join(base_out, "index.html"), "w") as fh:
+        fh.write(html)
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].startswith("--") else "--render"
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -472,6 +535,13 @@ def main():
     with open(os.path.join(out_dir, "result.json"), "w") as fh:
         json.dump({"files": [os.path.basename(f) for f in files]}, fh)
     print("RENDERED", jid, [os.path.basename(f) for f in files])
+    try:
+        title = job.get("title") or ((job.get("slides") or [{}])[0].get("title")) or ((job.get("scenes") or [{}])[0].get("caption")) or ""
+        items = carry_over(base_out, jid) + [{"id": jid, "type": job["type"], "title": title,
+                                               "files": [os.path.basename(f) for f in files], "ts": time.time()}]
+        write_showcase(base_out, items)
+    except Exception as e:  # noqa: BLE001
+        print("showcase skipped:", e)
     if os.environ.get("UPLOAD_MODE") == "hosting":
         payload = {"id": job.get("id"), "type": job.get("type"), "status": "ok"}
         urls = [upload(p) for p in files]
