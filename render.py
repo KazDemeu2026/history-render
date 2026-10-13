@@ -298,11 +298,12 @@ def chunk_caption(text, max_words=4):
 
 
 def subtitle_layer(text, draw_probe):
-    f, lines, size = fit_text(draw_probe, text.upper(), lambda s: font_sans(s, 900), VW - 160, 330, 84, 52, 1.12)
+    # Субтитры ниже и чуть мельче; центр на 73% высоты — над подписью и кнопками Instagram.
+    f, lines, size = fit_text(draw_probe, text.upper(), lambda s: font_sans(s, 900), VW - 180, 260, 70, 44, 1.12)
     layer = Image.new("RGBA", (VW, VH), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     total_h = int(len(lines) * size * 1.12)
-    y = int(VH * 0.64) - total_h // 2
+    y = int(VH * 0.73) - total_h // 2
     for ln in lines:
         w = d.textlength(ln, font=f)
         x = (VW - w) / 2
