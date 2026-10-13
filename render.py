@@ -311,6 +311,96 @@ def subtitle_layer(text, draw_probe):
     return layer
 
 
+# ---------------------------------------------------------------- ИИ-видео (fal.ai)
+
+FAL_MODEL = os.environ.get("FAL_MODEL") or "fal-ai/kling-video/v2.5-turbo/pro/text-to-video"
+AI_NEG = "text, letters, watermark, logo, subtitles, blood, gore, modern objects, cars, extra limbs, deformed faces, blur, low quality"
+
+
+def fal_clips(scenes, tmp):
+    """Генерирует видео для сцен с полем video_prompt. Возвращает {индекс сцены: путь к mp4}.
+    Любая ошибка — не страшно: сцена останется с картиной."""
+    key = os.environ.get("FAL_KEY", "").strip()
+    todo = [(i, s["video_prompt"]) for i, s in enumerate(scenes) if s.get("video_prompt")][:3]
+    if not key or not todo:
+        print("ai video: skipped (no key or no prompts)")
+        return {}
+    hdr = {"Authorization": "Key " + key, "Content-Type": "application/json"}
+    jobs = {}
+    for i, prompt in todo:
+        body = {"prompt": prompt + " Cinematic historical scene, vertical frame, dramatic natural light, no text.",
+                "duration": "5", "aspect_ratio": "9:16", "negative_prompt": AI_NEG}
+        try:
+            r = requests.post("https://queue.fal.run/" + FAL_MODEL, json=body, headers=hdr, timeout=60)
+            r.raise_for_status()
+            j = r.json()
+            jobs[i] = j
+            print("ai video submitted", i, j.get("request_id"))
+        except Exception as e:  # noqa: BLE001
+            print("ai video submit failed", i, str(e)[:200])
+    out, t0 = {}, time.time()
+    while jobs and time.time() - t0 < 600:
+        time.sleep(8)
+        for i in list(jobs):
+            j = jobs[i]
+            try:
+                st = requests.get(j["status_url"], headers=hdr, timeout=30).json()
+                status = st.get("status")
+                if status == "COMPLETED":
+                    res = requests.get(j["response_url"], headers=hdr, timeout=60).json()
+                    url = ((res.get("video") or {}).get("url")) or ""
+                    if url:
+                        path = os.path.join(tmp, f"clip_{i}.mp4")
+                        rr = requests.get(url, timeout=180)
+                        rr.raise_for_status()
+                        with open(path, "wb") as fh:
+                            fh.write(rr.content)
+                        out[i] = path
+                        print("ai video ready", i, round(time.time() - t0), "s")
+                    else:
+                        print("ai video no url", i, str(res)[:200])
+                    del jobs[i]
+                elif status not in ("IN_QUEUE", "IN_PROGRESS"):
+                    print("ai video failed", i, str(st)[:200])
+                    del jobs[i]
+            except Exception as e:  # noqa: BLE001
+                print("ai video poll error", i, str(e)[:160])
+    for i in jobs:
+        print("ai video timeout", i)
+    return out
+
+
+class ClipReader:
+    """Отдаёт кадры ИИ-видео 1080x1920 по одному; растягивает клип (замедляет) до длины сцены."""
+
+    def __init__(self, path, need_frames):
+        clip_d = max(0.5, probe_duration(path))
+        slow = min(1.8, max(1.0, (need_frames / FPS) / clip_d))
+        vf = (f"scale={VW}:{VH}:force_original_aspect_ratio=increase,crop={VW}:{VH},"
+              f"setpts={slow:.3f}*PTS,fps={FPS}")
+        self.proc = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-i", path, "-vf", vf, "-an",
+                                      "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+        self.last = None
+
+    def next(self):
+        if self.proc:
+            raw = self.proc.stdout.read(VW * VH * 3)
+            if len(raw) == VW * VH * 3:
+                self.last = Image.frombytes("RGB", (VW, VH), raw)
+            else:
+                self.close()
+        return self.last
+
+    def close(self):
+        if self.proc:
+            try:
+                self.proc.stdout.close()
+                self.proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            self.proc = None
+
+
 def render_reel(job, out_dir):
     scenes = job["scenes"][:12]
     tmp = tempfile.mkdtemp()
@@ -344,6 +434,7 @@ def render_reel(job, out_dir):
     for s in scenes:
         img = load_image(s["image_url"])
         bases.append(cover(img, int(VW * 1.18), int(VH * 1.18)))
+    clips = fal_clips(scenes, tmp)
 
     out = os.path.join(out_dir, "reel.mp4")
     cmd = [
@@ -371,14 +462,24 @@ def render_reel(job, out_dir):
         zoom_in = si % 2 == 0
         px, py = rng.uniform(-0.5, 0.5), rng.uniform(-0.5, 0.5)
         frames_tail = []
+        reader = None
+        if si in clips:
+            try:
+                reader = ClipReader(clips[si], n)
+            except Exception as e:  # noqa: BLE001
+                print("clip reader failed", si, e)
         for fi in range(n):
             t = fi / max(1, n - 1)
             e = t * t * (3 - 2 * t)
-            z = 1.0 + 0.16 * (e if zoom_in else 1 - e)
-            cw_, ch_ = VW * 1.18 / z, VH * 1.18 / z
-            cx = (base.width - cw_) / 2 + px * (base.width - cw_) * 0.5 * e
-            cy = (base.height - ch_) / 2 + py * (base.height - ch_) * 0.5 * e
-            frame = base.crop((int(cx), int(cy), int(cx + cw_), int(cy + ch_))).resize((VW, VH), Image.BILINEAR)
+            vframe = reader.next() if reader else None
+            if vframe is not None:
+                frame = vframe.copy()
+            else:
+                z = 1.0 + 0.16 * (e if zoom_in else 1 - e)
+                cw_, ch_ = VW * 1.18 / z, VH * 1.18 / z
+                cx = (base.width - cw_) / 2 + px * (base.width - cw_) * 0.5 * e
+                cy = (base.height - ch_) / 2 + py * (base.height - ch_) * 0.5 * e
+                frame = base.crop((int(cx), int(cy), int(cx + cw_), int(cy + ch_))).resize((VW, VH), Image.BILINEAR)
             frame = frame.convert("RGBA")
             frame.alpha_composite(overlay_static)
             if fi >= n - fade and si < last:
@@ -391,6 +492,8 @@ def render_reel(job, out_dir):
             ci = next((i for i, b in enumerate(bounds) if t <= b), len(subs) - 1)
             frame.alpha_composite(subs[ci])
             proc.stdin.write(frame.convert("RGB").tobytes())
+        if reader:
+            reader.close()
         prev_tail = frames_tail if frames_tail else None
     if prev_tail:
         for fr in prev_tail:
@@ -399,8 +502,21 @@ def render_reel(job, out_dir):
     if proc.wait() != 0:
         raise RuntimeError("ffmpeg failed")
     files = [out]
+    cover_base = bases[0]
+    if 0 in clips:
+        try:
+            fr = ClipReader(clips[0], FPS * 2)
+            img = None
+            for _ in range(int(FPS * 1.5)):
+                nxt = fr.next()
+                img = nxt if nxt is not None else img
+            fr.close()
+            if img is not None:
+                cover_base = img
+        except Exception as e:  # noqa: BLE001
+            print("cover frame failed", e)
     try:
-        files.append(reel_cover(job, bases[0], brand, out_dir))
+        files.append(reel_cover(job, cover_base, brand, out_dir))
     except Exception as e:  # noqa: BLE001
         print("cover skipped:", e)
     return files
