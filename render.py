@@ -401,16 +401,114 @@ class ClipReader:
             self.proc = None
 
 
+# ---------------------------------------------------------------- озвучка через fal.ai (ElevenLabs и др.)
+
+def fal_tts(text, tts, path):
+    """tts = {"model": "fal-ai/elevenlabs/tts/eleven-v3", "body": {...}}. Возвращает список таймкодов слов или None."""
+    key = os.environ.get("FAL_KEY", "").strip()
+    if not key:
+        raise RuntimeError("no FAL_KEY")
+    model = tts.get("model") or "fal-ai/elevenlabs/tts/eleven-v3"
+    body = dict(tts.get("body") or {})
+    body["text"] = text
+    if "elevenlabs" in model:
+        body.setdefault("language_code", "ru")
+        body.setdefault("timestamps", True)
+    if "minimax" in model:
+        body.setdefault("output_format", "url")
+        body.setdefault("language_boost", "Russian")
+    r = requests.post("https://fal.run/" + model, json=body,
+                      headers={"Authorization": "Key " + key, "Content-Type": "application/json"}, timeout=300)
+    if r.status_code >= 300:
+        raise RuntimeError(f"tts {r.status_code} {r.text[:300]}")
+    j = r.json()
+    url = ((j.get("audio") or {}).get("url")) or j.get("audio_url") or ""
+    if not url:
+        raise RuntimeError("tts: no audio url " + str(j)[:200])
+    rr = requests.get(url, timeout=120)
+    rr.raise_for_status()
+    with open(path, "wb") as fh:
+        fh.write(rr.content)
+    return j.get("timestamps")
+
+
+def word_starts(stamps):
+    """Приводит таймкоды разных форматов к списку времени начала слов."""
+    out = []
+    for w in stamps or []:
+        if not isinstance(w, dict):
+            continue
+        txt = str(w.get("text", w.get("word", ""))).strip()
+        st = w.get("start", w.get("start_time", w.get("startTime")))
+        if txt and st is not None and any(ch.isalnum() for ch in txt):
+            out.append(float(st))
+    return out
+
+
+def render_voices(job, out_dir):
+    """Пробник голосов: один и тот же текст разными голосами, чтобы выбрать на слух."""
+    files = []
+    for i, v in enumerate(job.get("voices", [])):
+        label = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in v.get("label", f"voice{i}"))[:60]
+        path = os.path.join(out_dir, f"{i + 1:02d}_{label}.mp3")
+        try:
+            if v.get("file"):
+                with open(os.path.join(HERE, v["file"]), "rb") as src, open(path, "wb") as dst:
+                    dst.write(src.read())
+            else:
+                fal_tts(job["text"], v, path)
+            files.append(path)
+            print("voice ok", label)
+        except Exception as e:  # noqa: BLE001
+            print("voice failed", label, str(e)[:300])
+    return files
+
+
 def render_reel(job, out_dir):
     scenes = job["scenes"][:12]
     tmp = tempfile.mkdtemp()
-    audio = download(job["audio_url"], os.path.join(tmp, "voice.mp3"))
+    audio, starts = None, []
+    if job.get("tts") and os.environ.get("FAL_KEY"):
+        try:
+            p = os.path.join(tmp, "voice_fal.mp3")
+            starts = word_starts(fal_tts(" ".join(s.get("caption", "") for s in scenes), job["tts"], p))
+            audio = p
+            print("tts: fal ok, words with time:", len(starts))
+        except Exception as e:  # noqa: BLE001
+            print("tts: fal failed, fallback to audio_url:", str(e)[:300])
+    if not audio:
+        audio = download(job["audio_url"], os.path.join(tmp, "voice.mp3"))
     dur = probe_duration(audio) + 0.6
     weights = [max(12, len(s.get("caption", ""))) for s in scenes]
     total_w = sum(weights)
     durs = [max(2.2, dur * w / total_w) for w in weights]
     k = dur / sum(durs)
     durs = [x * k for x in durs]
+    sub_bounds = {}
+    words_per_scene = [len(str(s.get("caption", "")).split()) for s in scenes]
+    total_words = sum(words_per_scene)
+    if starts and total_words and abs(len(starts) - total_words) <= max(3, total_words // 10):
+        # Точная синхронизация по таймкодам голоса: смена сцен и субтитров — на начале нужного слова.
+        ratio = len(starts) / total_words
+        idx = lambda wi: min(len(starts) - 1, int(round(wi * ratio)))
+        cum, scene_t = 0, []
+        for wc in words_per_scene:
+            scene_t.append(0.0 if cum == 0 else starts[idx(cum)])
+            cum += wc
+        scene_t.append(dur)
+        durs = [max(0.8, scene_t[i + 1] - scene_t[i]) for i in range(len(scenes))]
+        cum = 0
+        for si, s in enumerate(scenes):
+            chunks = chunk_caption(s.get("caption", ""))
+            b, wcount = [], cum
+            for c in chunks:
+                wcount += len(c.split())
+                end_t = starts[idx(wcount)] if wcount < total_words else dur
+                b.append(min(1.0, max(0.0, (end_t - scene_t[si]) / max(0.1, durs[si]))))
+            b[-1] = 1.0
+            sub_bounds[si] = b
+            cum += words_per_scene[si]
+        print("timing: synced to voice")
 
     brand = job.get("brand", "Хроники времени")
     overlay_static = Image.new("RGBA", (VW, VH), (0, 0, 0, 0))
@@ -458,6 +556,8 @@ def render_reel(job, out_dir):
         for c in cw:
             acc += c
             bounds.append(acc / sum(cw))
+        if si in sub_bounds and len(sub_bounds[si]) == len(chunks):
+            bounds = sub_bounds[si]
         subs = [subtitle_layer(c, probe) for c in chunks]
         zoom_in = si % 2 == 0
         px, py = rng.uniform(-0.5, 0.5), rng.uniform(-0.5, 0.5)
@@ -632,7 +732,11 @@ def write_showcase(base_out, items):
     cards = []
     for it in sorted(items, key=lambda x: -float(x.get("ts", 0))):
         when = time.strftime("%d.%m %H:%M", time.gmtime(float(it.get("ts", 0)) + 5 * 3600))
-        kind = "Reels" if it.get("type") == "reel" else "Карусель"
+        kind = {"reel": "Reels", "voices": "Пробник голосов"}.get(it.get("type"), "Карусель")
+        if it.get("type") == "voices":
+            media = "".join('<div style="margin:8px 0"><b>%s</b><br><audio controls preload="none" src="%s/%s"></audio></div>' % (esc(f[3:-4].replace("_", " ")), it["id"], f) for f in it.get("files", []))
+            cards.append('<section><h2>%s · %s</h2><p>%s</p>%s</section>' % (kind, when, esc(it.get("title")), media))
+            continue
         if it.get("type") == "reel":
             media = "".join(('<video controls preload="metadata" src="%s/%s"></video>' if f.endswith(".mp4") else '<img loading="lazy" style="height:480px" src="%s/%s">') % (it["id"], f) for f in it.get("files", []))
         else:
@@ -690,6 +794,8 @@ def main():
         files = render_carousel(job, out_dir)
     elif job["type"] == "reel":
         files = render_reel(job, out_dir)
+    elif job["type"] == "voices":
+        files = render_voices(job, out_dir)
     else:
         raise ValueError("unknown type " + str(job.get("type")))
     with open(os.path.join(out_dir, "result.json"), "w") as fh:
