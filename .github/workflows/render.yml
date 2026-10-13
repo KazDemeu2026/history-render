@@ -41,6 +41,7 @@ jobs:
           JOB: ${{ inputs.job }}
           OUT_DIR: site
           SITE_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          FAL_KEY: ${{ secrets.FAL_KEY }}
         run: python render.py --render
 
       - uses: actions/configure-pages@v5
