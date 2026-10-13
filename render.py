@@ -370,6 +370,84 @@ def fal_clips(scenes, tmp):
     return out
 
 
+def pexels_clips(scenes, tmp, seed="x"):
+    """Бесплатные стоковые видео Pexels для сцен с полем stock_query (обычно первые две)."""
+    key = os.environ.get("PEXELS_KEY", "").strip()
+    todo = [(i, s.get("stock_query")) for i, s in enumerate(scenes) if s.get("stock_query")][:3]
+    if not key or not todo:
+        print("pexels: skipped (no key or no queries)")
+        return {}
+    rng = random.Random(seed)
+    out, used = {}, set()
+    for i, q in todo:
+        try:
+            r = requests.get("https://api.pexels.com/videos/search", headers={"Authorization": key}, timeout=30,
+                             params={"query": q, "orientation": "portrait", "per_page": 15, "size": "medium"})
+            r.raise_for_status()
+            cands = []
+            for v in r.json().get("videos", []):
+                if v.get("id") in used or (v.get("duration") or 0) < 4:
+                    continue
+                files = [f for f in v.get("video_files", []) if (f.get("height") or 0) >= 1280 and (f.get("width") or 9999) < (f.get("height") or 0)]
+                if files:
+                    best = min(files, key=lambda f: abs((f.get("height") or 0) - 1920))
+                    cands.append((v["id"], best["link"]))
+            if not cands:
+                print("pexels: nothing for", q)
+                continue
+            vid, link = rng.choice(cands[:5])
+            used.add(vid)
+            path = os.path.join(tmp, f"stock_{i}.mp4")
+            rr = requests.get(link, timeout=180)
+            rr.raise_for_status()
+            with open(path, "wb") as fh:
+                fh.write(rr.content)
+            out[i] = path
+            print("pexels ok", i, q, vid)
+        except Exception as e:  # noqa: BLE001
+            print("pexels failed", i, q, str(e)[:200])
+    return out
+
+
+def pixabay_clips(scenes, tmp, seed="x"):
+    """Бесплатные стоковые видео Pixabay для сцен с полем stock_query."""
+    key = os.environ.get("PIXABAY_KEY", "").strip()
+    todo = [(i, s.get("stock_query")) for i, s in enumerate(scenes) if s.get("stock_query")][:3]
+    if not key or not todo:
+        print("pixabay: skipped (no key or no queries)")
+        return {}
+    rng = random.Random(seed)
+    out, used = {}, set()
+    for i, q in todo:
+        try:
+            r = requests.get("https://pixabay.com/api/videos/", timeout=30,
+                             params={"key": key, "q": q, "per_page": 20, "safesearch": "true", "video_type": "film"})
+            r.raise_for_status()
+            cands = []
+            for h in r.json().get("hits", []):
+                if h.get("id") in used or (h.get("duration") or 0) < 4:
+                    continue
+                vids = h.get("videos") or {}
+                pick = next((vids[k] for k in ("large", "medium") if (vids.get(k) or {}).get("url") and (vids[k].get("height") or 0) >= 1080), None)
+                if pick:
+                    cands.append((h["id"], pick["url"]))
+            if not cands:
+                print("pixabay: nothing for", q)
+                continue
+            vid, link = rng.choice(cands[:5])
+            used.add(vid)
+            path = os.path.join(tmp, f"stock_{i}.mp4")
+            rr = requests.get(link, timeout=180)
+            rr.raise_for_status()
+            with open(path, "wb") as fh:
+                fh.write(rr.content)
+            out[i] = path
+            print("pixabay ok", i, q, vid)
+        except Exception as e:  # noqa: BLE001
+            print("pixabay failed", i, q, str(e)[:200])
+    return out
+
+
 class ClipReader:
     """Отдаёт кадры ИИ-видео 1080x1920 по одному; растягивает клип (замедляет) до длины сцены."""
 
@@ -533,6 +611,10 @@ def render_reel(job, out_dir):
         img = load_image(s["image_url"])
         bases.append(cover(img, int(VW * 1.18), int(VH * 1.18)))
     clips = fal_clips(scenes, tmp)
+    if not clips:
+        clips = pexels_clips(scenes, tmp, job.get("id", "x"))
+    if not clips:
+        clips = pixabay_clips(scenes, tmp, job.get("id", "x"))
 
     out = os.path.join(out_dir, "reel.mp4")
     cmd = [
