@@ -331,6 +331,13 @@ def render_reel(job, out_dir):
     bf = font_sans(34, 700)
     bw = od.textlength(brand.upper(), font=bf) + 34 * 0.36 * 1.5 + 34 * 0.45
     badge(od, (VW - bw) / 2, 90, brand, 34)
+    label = (job.get("series_label") or "").upper().strip()
+    if label:
+        lf = font_sans(30, 800)
+        lw = od.textlength(label, font=lf)
+        x0, y0 = (VW - lw) / 2 - 26, 146
+        od.rounded_rectangle((x0, y0, x0 + lw + 52, y0 + 56), radius=28, fill=(0, 0, 0, 170), outline=GOLD, width=3)
+        od.text((x0 + 26, y0 + 10), label, font=lf, fill=WHITE)
 
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
     bases = []
@@ -391,7 +398,41 @@ def render_reel(job, out_dir):
     proc.stdin.close()
     if proc.wait() != 0:
         raise RuntimeError("ffmpeg failed")
-    return [out]
+    files = [out]
+    try:
+        files.append(reel_cover(job, bases[0], brand, out_dir))
+    except Exception as e:  # noqa: BLE001
+        print("cover skipped:", e)
+    return files
+
+
+def reel_cover(job, base, brand, out_dir):
+    """Обложка Reels 1080x1920. Текст в центре, чтобы он был виден и в сетке профиля (обрезка 3:4)."""
+    img = cover(base, VW, VH).convert("RGBA")
+    img.alpha_composite(Image.new("RGBA", (VW, VH), INK + (95,)))
+    img.alpha_composite(gradient(VW, VH, 30, 235, start=0.30))
+    d = ImageDraw.Draw(img)
+    bf = font_sans(34, 700)
+    bw = d.textlength(brand.upper(), font=bf) + 34 * 0.36 * 1.5 + 34 * 0.45
+    badge(d, (VW - bw) / 2, 300, brand, 34)
+    kicker = (job.get("cover_kicker") or "").upper().strip()
+    title = (job.get("cover_title") or job.get("title") or "").strip()
+    pad = 90
+    f, lines, size = fit_text(d, title, font_title, VW - 2 * pad, 620, 112, 60, 1.1)
+    block = int(len(lines) * size * 1.1)
+    y = VH // 2 - block // 2 + 40
+    if kicker:
+        kf = font_sans(38, 800)
+        kw = d.textlength(kicker, font=kf)
+        d.rounded_rectangle(((VW - kw) / 2 - 30, y - 120, (VW + kw) / 2 + 30, y - 52), radius=34, fill=GOLD)
+        d.text(((VW - kw) / 2, y - 111), kicker, font=kf, fill=INK)
+    for ln in lines:
+        w = d.textlength(ln, font=f)
+        d.text(((VW - w) / 2, y), ln, font=f, fill=WHITE, stroke_width=3, stroke_fill=(0, 0, 0))
+        y += int(size * 1.1)
+    p = os.path.join(out_dir, "cover.jpg")
+    img.convert("RGB").save(p, "JPEG", quality=90, optimize=True)
+    return p
 
 # ---------------------------------------------------------------- main
 
@@ -477,7 +518,7 @@ def write_showcase(base_out, items):
         when = time.strftime("%d.%m %H:%M", time.gmtime(float(it.get("ts", 0)) + 5 * 3600))
         kind = "Reels" if it.get("type") == "reel" else "Карусель"
         if it.get("type") == "reel":
-            media = "".join('<video controls preload="metadata" src="%s/%s"></video>' % (it["id"], f) for f in it.get("files", []))
+            media = "".join(('<video controls preload="metadata" src="%s/%s"></video>' if f.endswith(".mp4") else '<img loading="lazy" style="height:480px" src="%s/%s">') % (it["id"], f) for f in it.get("files", []))
         else:
             media = "".join('<a href="%s/%s"><img loading="lazy" src="%s/%s"></a>' % (it["id"], f, it["id"], f) for f in it.get("files", []))
         cards.append('<section><h2>%s · %s</h2><p>%s</p><div class="row">%s</div></section>' % (kind, when, esc(it.get("title")), media))
@@ -519,6 +560,9 @@ def main():
         payload = {"id": job.get("id"), "type": job.get("type"), "status": "ok"}
         if job["type"] == "reel":
             payload["video_url"] = urls[0]
+            covers = [u for u in urls[1:] if u.endswith(".jpg")]
+            if covers:
+                payload["cover_url"] = covers[0]
         else:
             payload["image_urls"] = urls
         callback(job, payload)
