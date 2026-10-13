@@ -42,6 +42,8 @@ jobs:
           OUT_DIR: site
           SITE_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
           FAL_KEY: ${{ secrets.FAL_KEY }}
+          PEXELS_KEY: ${{ secrets.PEXELS_KEY }}
+          PIXABAY_KEY: ${{ secrets.PIXABAY_KEY }}
         run: python render.py --render
 
       - uses: actions/configure-pages@v5
