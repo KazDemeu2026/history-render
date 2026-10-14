@@ -622,7 +622,8 @@ class MapScene:
         e = t * t * (3 - 2 * t)
         b = [self.b1[i] + (self.b2[i] - self.b1[i]) * e for i in range(4)]
         ox, oy = self.off
-        img = self.sub.crop((int(b[0] - ox), int(b[1] - oy), int(b[2] - ox), int(b[3] - oy))).resize((VW, VH), Image.BILINEAR)
+        # субпиксельная камера: без целочисленного округления карта движется плавно, без рывков
+        img = self.sub.resize((VW, VH), Image.BICUBIC, box=(b[0] - ox, b[1] - oy, b[2] - ox, b[3] - oy))
         img = img.convert("RGBA")
         sx, sy = VW / (b[2] - b[0]), VH / (b[3] - b[1])
         P = [((x - b[0]) * sx, (y - b[1]) * sy) for x, y in self.xy]
@@ -808,7 +809,7 @@ def render_reel(job, out_dir):
                 cw_, ch_ = VW * 1.18 / z, VH * 1.18 / z
                 cx = (base.width - cw_) / 2 + px * (base.width - cw_) * 0.5 * e
                 cy = (base.height - ch_) / 2 + py * (base.height - ch_) * 0.5 * e
-                frame = base.crop((int(cx), int(cy), int(cx + cw_), int(cy + ch_))).resize((VW, VH), Image.BILINEAR)
+                frame = base.resize((VW, VH), Image.BILINEAR, box=(cx, cy, cx + cw_, cy + ch_))
             frame = frame.convert("RGBA")
             frame.alpha_composite(overlay_static)
             if fi >= n - fade and si < last:
