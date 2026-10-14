@@ -30,7 +30,7 @@ import textwrap
 import time
 
 import requests
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(HERE, "fonts")
@@ -543,6 +543,143 @@ def render_voices(job, out_dir):
     return files
 
 
+# ---------------------------------------------------------------- карта походов
+
+WORLD_PATH = os.path.join(FONT_DIR, "world.jpg")
+_WORLD = {}
+RED = (196, 52, 40)
+
+
+def world_map():
+    """Карта мира NASA Blue Marble (общественное достояние) в старинной тонировке, без современных границ."""
+    if "img" not in _WORLD:
+        img = None
+        if os.path.exists(WORLD_PATH) and os.path.getsize(WORLD_PATH) > 100000:
+            try:
+                raw = Image.open(WORLD_PATH).convert("RGB")
+                if raw.width > 5400:
+                    raw = raw.resize((5400, 2700), Image.LANCZOS)
+                sep = ImageOps.colorize(ImageOps.grayscale(raw), (28, 20, 12), (238, 214, 170))
+                img = Image.blend(raw, sep, 0.6)
+            except Exception as e:  # noqa: BLE001
+                print("world map failed:", e)
+        _WORLD["img"] = img
+    return _WORLD["img"]
+
+
+def map_points(m):
+    pts = []
+    for p in (m or {}).get("points", [])[:6]:
+        try:
+            lat, lon = float(p.get("lat")), float(p.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        if -75 <= lat <= 80 and -180 <= lon <= 180:
+            pts.append({"name": str(p.get("name") or "")[:28], "lat": lat, "lon": lon})
+    return pts
+
+
+class MapScene:
+    """Анимированная карта: камера плавно приближается, маршрут прорисовывается, города появляются по ходу."""
+
+    def __init__(self, m, n):
+        W = world_map()
+        self.n = n
+        self.pts = map_points(m)
+        self.route = bool(m.get("route", True)) and len(self.pts) > 1
+        self.title = str(m.get("title") or "").upper()[:42]
+        Wd, Ht = W.size
+        xy = [((p["lon"] + 180) / 360 * Wd, (90 - p["lat"]) / 180 * Ht) for p in self.pts]
+        xs, ys = [a for a, _ in xy], [b for _, b in xy]
+        span_w = max((max(xs) - min(xs)) * 1.3, Wd * 22 / 360)
+        span_h = max((max(ys) - min(ys)) * 1.5, span_w * VH / VW)
+        span_h = min(span_h, Ht * 0.95)
+        span_w = span_h * VW / VH
+        cx = (min(xs) + max(xs)) / 2
+        cy = (min(ys) + max(ys)) / 2 + span_h * 0.08  # точки чуть выше центра — ниже субтитры
+        def box(k):
+            w, h = span_w * k, span_h * k
+            x0 = min(max(cx - w / 2, 0), Wd - w)
+            y0 = min(max(cy - h / 2, 0), Ht - h)
+            return (x0, y0, x0 + w, y0 + h)
+        self.b1, self.b2 = box(1.22), box(1.0)
+        ox0, oy0 = min(self.b1[0], self.b2[0]), min(self.b1[1], self.b2[1])
+        ox1, oy1 = max(self.b1[2], self.b2[2]), max(self.b1[3], self.b2[3])
+        self.off = (int(ox0), int(oy0))
+        self.sub = W.crop((int(ox0), int(oy0), int(ox1) + 1, int(oy1) + 1))
+        self.xy = xy
+        seg = [math.dist(xy[i], xy[i + 1]) for i in range(len(xy) - 1)]
+        self.total = sum(seg) or 1
+        acc, self.at = 0, [0.0]
+        for d in seg:
+            acc += d
+            self.at.append(acc / self.total)
+        self.lf = font_sans(40, 800)
+        self.tf = font_sans(46, 900)
+
+    def frame(self, fi):
+        t = fi / max(1, self.n - 1)
+        e = t * t * (3 - 2 * t)
+        b = [self.b1[i] + (self.b2[i] - self.b1[i]) * e for i in range(4)]
+        ox, oy = self.off
+        img = self.sub.crop((int(b[0] - ox), int(b[1] - oy), int(b[2] - ox), int(b[3] - oy))).resize((VW, VH), Image.BILINEAR)
+        img = img.convert("RGBA")
+        sx, sy = VW / (b[2] - b[0]), VH / (b[3] - b[1])
+        P = [((x - b[0]) * sx, (y - b[1]) * sy) for x, y in self.xy]
+        d = ImageDraw.Draw(img)
+        prog = min(1.0, max(0.0, (t - 0.08) / 0.7)) if self.route else 1.0
+        if self.route and prog > 0:
+            pts, tip = [P[0]], P[0]
+            for i in range(len(P) - 1):
+                if prog >= self.at[i + 1]:
+                    pts.append(P[i + 1]); tip = P[i + 1]
+                else:
+                    k = (prog - self.at[i]) / max(1e-6, self.at[i + 1] - self.at[i])
+                    tip = (P[i][0] + (P[i + 1][0] - P[i][0]) * k, P[i][1] + (P[i + 1][1] - P[i][1]) * k)
+                    pts.append(tip)
+                    break
+            if len(pts) > 1:
+                d.line(pts, fill=(0, 0, 0, 160), width=18, joint="curve")
+                d.line(pts, fill=RED + (255,), width=10, joint="curve")
+                a, c = pts[-2], pts[-1]
+                ang = math.atan2(c[1] - a[1], c[0] - a[0])
+                L = 34
+                d.polygon([c, (c[0] - L * math.cos(ang - 0.45), c[1] - L * math.sin(ang - 0.45)),
+                           (c[0] - L * math.cos(ang + 0.45), c[1] - L * math.sin(ang + 0.45))], fill=RED + (255,))
+        vis = [((prog >= self.at[k] - 1e-6) if self.route else (t >= 0.08 + k * 0.12)) for k in range(len(P))]
+        placed = [(x - 22, y - 22, x + 22, y + 22) for k, (x, y) in enumerate(P) if vis[k]]
+        for k, (x, y) in enumerate(P):
+            if not vis[k]:
+                continue
+            r = 15
+            d.ellipse((x - r - 4, y - r - 4, x + r + 4, y + r + 4), fill=(0, 0, 0, 150))
+            d.ellipse((x - r, y - r, x + r, y + r), fill=GOLD + (255,), outline=(255, 255, 255, 255), width=4)
+            name = self.pts[k]["name"].upper()
+            if name:
+                tw = d.textlength(name, font=self.lf)
+                best = None
+                for dy in (-26, -80, 28, -134, 82):
+                    for right in (True, False):
+                        tx = x + 30 if right else x - 30 - tw
+                        if tx < 30 or tx + tw > VW - 30:
+                            continue
+                        boxr = (tx - 6, y + dy - 6, tx + tw + 6, y + dy + 52)
+                        if not any(not (boxr[2] < q[0] or boxr[0] > q[2] or boxr[3] < q[1] or boxr[1] > q[3]) for q in placed):
+                            best = (tx, y + dy, boxr)
+                            break
+                    if best:
+                        break
+                if best is None:
+                    tx = x + 30 if x + 30 + tw < VW - 30 else x - 30 - tw
+                    best = (tx, y - 26, (tx, y - 26, tx + tw, y + 26))
+                placed.append(best[2])
+                d.text((best[0], best[1]), name, font=self.lf, fill=WHITE, stroke_width=6, stroke_fill=(0, 0, 0))
+        if self.title:
+            tw = d.textlength(self.title, font=self.tf)
+            d.text(((VW - tw) / 2, 232), self.title, font=self.tf, fill=GOLD, stroke_width=6, stroke_fill=(0, 0, 0))
+        return img
+
+
 def render_reel(job, out_dir):
     scenes = job["scenes"][:12]
     tmp = tempfile.mkdtemp()
@@ -646,17 +783,26 @@ def render_reel(job, out_dir):
         px, py = rng.uniform(-0.5, 0.5), rng.uniform(-0.5, 0.5)
         frames_tail = []
         reader = None
+        mapper = None
         if si in clips:
             try:
                 reader = ClipReader(clips[si], n)
             except Exception as e:  # noqa: BLE001
                 print("clip reader failed", si, e)
+        elif s.get("map") and map_points(s["map"]) and world_map() is not None:
+            try:
+                mapper = MapScene(s["map"], n)
+                print("map scene", si, [p["name"] for p in mapper.pts])
+            except Exception as e:  # noqa: BLE001
+                print("map scene failed", si, e)
         for fi in range(n):
             t = fi / max(1, n - 1)
             e = t * t * (3 - 2 * t)
             vframe = reader.next() if reader else None
             if vframe is not None:
                 frame = vframe.copy()
+            elif mapper is not None:
+                frame = mapper.frame(fi)
             else:
                 z = 1.0 + 0.16 * (e if zoom_in else 1 - e)
                 cw_, ch_ = VW * 1.18 / z, VH * 1.18 / z
