@@ -676,7 +676,7 @@ class MapScene:
                 d.text((best[0], best[1]), name, font=self.lf, fill=WHITE, stroke_width=6, stroke_fill=(0, 0, 0))
         if self.title:
             tw = d.textlength(self.title, font=self.tf)
-            d.text(((VW - tw) / 2, 232), self.title, font=self.tf, fill=GOLD, stroke_width=6, stroke_fill=(0, 0, 0))
+            d.text(((VW - tw) / 2, 262), self.title, font=self.tf, fill=GOLD, stroke_width=6, stroke_fill=(0, 0, 0))
         return img
 
 
