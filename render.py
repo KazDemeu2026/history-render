@@ -543,6 +543,14 @@ def render_voices(job, out_dir):
     return files
 
 
+def safe_box(img, x0, y0, x1, y1):
+    """Окно камеры внутри картинки (PIL не принимает box за её пределами)."""
+    w, h = img.size
+    bw, bh = min(x1 - x0, w), min(y1 - y0, h)
+    x0 = min(max(x0, 0.0), w - bw)
+    y0 = min(max(y0, 0.0), h - bh)
+    return (x0, y0, x0 + bw, y0 + bh)
+
 # ---------------------------------------------------------------- карта походов
 
 WORLD_PATH = os.path.join(FONT_DIR, "world.jpg")
@@ -623,7 +631,7 @@ class MapScene:
         b = [self.b1[i] + (self.b2[i] - self.b1[i]) * e for i in range(4)]
         ox, oy = self.off
         # субпиксельная камера: без целочисленного округления карта движется плавно, без рывков
-        img = self.sub.resize((VW, VH), Image.BICUBIC, box=(b[0] - ox, b[1] - oy, b[2] - ox, b[3] - oy))
+        img = self.sub.resize((VW, VH), Image.BICUBIC, box=safe_box(self.sub, b[0] - ox, b[1] - oy, b[2] - ox, b[3] - oy))
         img = img.convert("RGBA")
         sx, sy = VW / (b[2] - b[0]), VH / (b[3] - b[1])
         P = [((x - b[0]) * sx, (y - b[1]) * sy) for x, y in self.xy]
@@ -809,7 +817,7 @@ def render_reel(job, out_dir):
                 cw_, ch_ = VW * 1.18 / z, VH * 1.18 / z
                 cx = (base.width - cw_) / 2 + px * (base.width - cw_) * 0.5 * e
                 cy = (base.height - ch_) / 2 + py * (base.height - ch_) * 0.5 * e
-                frame = base.resize((VW, VH), Image.BILINEAR, box=(cx, cy, cx + cw_, cy + ch_))
+                frame = base.resize((VW, VH), Image.BILINEAR, box=safe_box(base, cx, cy, cx + cw_, cy + ch_))
             frame = frame.convert("RGBA")
             frame.alpha_composite(overlay_static)
             if fi >= n - fade and si < last:
