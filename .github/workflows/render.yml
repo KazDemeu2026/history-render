@@ -35,6 +35,9 @@ jobs:
           mkdir -p fonts
           curl -fsSL -o fonts/Montserrat.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf" || true
           curl -fsSL -o fonts/Playfair.ttf "https://github.com/google/fonts/raw/main/ofl/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf" || true
+          # Карта мира NASA Blue Marble (общественное достояние) — для сцен с походами и городами.
+          curl -fsSL -o fonts/world.jpg "https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73909/world.topo.bathy.200412.3x5400x2700.jpg" \
+            || curl -fsSL -A "HistoryRender/1.0 (https://github.com/KazDemeu2026/history-render)" -o fonts/world.jpg "https://commons.wikimedia.org/wiki/Special:FilePath/Whole_world_-_land_and_oceans.jpg?width=5400" || true
 
       - name: Render
         env:
