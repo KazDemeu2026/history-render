@@ -11,7 +11,7 @@
   "type": "carousel" | "reel",
   "id": "строка",
   "brand": "ХРОНИКИ ВРЕМЕНИ",
-  "handle": "@jumsaq_yu",
+  "handle": "@khronika_vremenii",
   "callback_url": "https://...",          # необязательно
   "slides": [{"image_url": "...", "title": "...", "text": "..."}],   # для carousel
   "scenes": [{"image_url": "...", "caption": "..."}],                # для reel
