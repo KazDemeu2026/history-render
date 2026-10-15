@@ -31,13 +31,21 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
-          pip install -q pillow requests
+          pip install -q pillow requests numpy
           mkdir -p fonts
           curl -fsSL -o fonts/Montserrat.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf" || true
           curl -fsSL -o fonts/Playfair.ttf "https://github.com/google/fonts/raw/main/ofl/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf" || true
           # Карта мира NASA Blue Marble (общественное достояние) — для сцен с походами и городами.
           curl -fsSL -o fonts/world.jpg "https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73909/world.topo.bathy.200412.3x5400x2700.jpg" \
             || curl -fsSL -A "HistoryRender/1.0 (https://github.com/KazDemeu2026/history-render)" -o fonts/world.jpg "https://commons.wikimedia.org/wiki/Special:FilePath/Whole_world_-_land_and_oceans.jpg?width=5400" || true
+          # Векторная карта Natural Earth (общественное достояние): суша, озёра (с историческим Аралом), реки + рельеф.
+          curl -fsSL -o fonts/PlayfairItalic.ttf "https://github.com/google/fonts/raw/main/ofl/playfairdisplay/PlayfairDisplay-Italic%5Bwght%5D.ttf" || true
+          mkdir -p fonts/ne
+          NE=https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson
+          for f in ne_10m_land ne_10m_lakes ne_10m_lakes_historic ne_10m_rivers_lake_centerlines; do
+            curl -fsSL -o fonts/ne/$f.geojson "$NE/$f.geojson" || true
+          done
+          curl -fsSL -o fonts/ne/elevation.jpg "https://raw.githubusercontent.com/mrdoob/three.js/r170/examples/textures/planets/earth_bump_roughness_clouds_4096.jpg" || true
 
       - name: Render
         env:
