@@ -30,7 +30,7 @@ import textwrap
 import time
 
 import requests
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(HERE, "fonts")
@@ -575,6 +575,295 @@ def world_map():
     return _WORLD["img"]
 
 
+# ---------------------------------------------------------------- векторная карта (Natural Earth, общественное достояние)
+# Рисуется заново под каждое окно камеры: берега и реки остаются чёткими при любом приближении.
+try:
+    import numpy as np
+except Exception:  # noqa: BLE001
+    np = None
+
+NE_DIR = os.environ.get("NE_DIR", os.path.join(FONT_DIR, "ne"))
+MAP_STYLE = os.environ.get("MAP_STYLE", "atlas")  # atlas | dark | nasa
+_NE = {}
+
+MAP_STYLES = {
+    # пергамент старинного атласа
+    "atlas": {"sea": (163, 182, 176), "sea_deep": (140, 162, 160), "land": (232, 214, 172), "land_hi": (196, 164, 118),
+              "coast": (92, 74, 52), "ripple": (110, 130, 128), "river": (86, 122, 140), "label": (70, 92, 104),
+              "shade": 0.55, "grain": 10, "grid": (120, 105, 80)},
+    # тёмная «документальная»
+    "dark": {"sea": (16, 22, 30), "sea_deep": (10, 14, 20), "land": (58, 50, 40), "land_hi": (96, 82, 62),
+             "coast": (233, 196, 106), "ripple": (40, 52, 64), "river": (70, 104, 130), "label": (120, 140, 156),
+             "shade": 0.7, "grain": 6, "grid": None},
+}
+
+# подписи морей, озёр и рек (рисуются в фон карты, курсивом)
+WATER_LABELS = [
+    ("Каспийское море", 42.0, 50.8, 1), ("Аральское море", 45.2, 59.6, 1), ("оз. Балхаш", 46.4, 74.5, 1),
+    ("Чёрное море", 43.3, 34.0, 1), ("Байкал", 53.5, 108.2, 1), ("Иссык-Куль", 42.4, 77.3, 2),
+    ("Средиземное море", 34.5, 18.0, 0), ("Персидский залив", 27.0, 51.5, 1), ("Жёлтое море", 35.5, 123.5, 1),
+    ("Японское море", 40.5, 135.0, 1), ("Аравийское море", 15.0, 64.0, 0), ("Бенгальский залив", 15.0, 88.5, 0),
+    ("Индийский океан", 0.0, 80.0, 0), ("Тихий океан", 30.0, 150.0, 0), ("Атлантический океан", 30.0, -40.0, 0),
+    ("Северный Ледовитый океан", 78.0, 80.0, 0), ("Балтийское море", 57.0, 19.5, 1),
+    ("Сырдарья", 44.6, 66.0, 2), ("Амударья", 40.2, 62.8, 2), ("Волга", 49.0, 45.3, 2), ("Иртыш", 51.0, 76.5, 2),
+    ("Или", 44.0, 77.5, 2), ("Урал", 50.2, 51.9, 2), ("Хуанхэ", 37.3, 111.5, 2), ("Янцзы", 29.8, 114.5, 2),
+    ("Дунай", 45.0, 22.5, 2), ("Днепр", 49.5, 33.0, 2), ("Обь", 61.0, 74.0, 2), ("Енисей", 62.0, 88.5, 2),
+    ("Инд", 27.5, 68.6, 2), ("Тигр", 35.0, 43.5, 2), ("Керулен", 47.7, 113.5, 2), ("Селенга", 49.8, 106.4, 2),
+]
+
+
+def _rings_of(geom):
+    if not geom:
+        return []
+    t, c = geom["type"], geom["coordinates"]
+    if t == "Polygon":
+        return [c]
+    if t == "MultiPolygon":
+        return c
+    return []
+
+
+def _lines_of(geom):
+    if not geom:
+        return []
+    t, c = geom["type"], geom["coordinates"]
+    if t == "LineString":
+        return [c]
+    if t == "MultiLineString":
+        return c
+    return []
+
+
+def _arr(coords):
+    a = np.asarray(coords, dtype=np.float64)[:, :2]
+    return a, (a[:, 0].min(), a[:, 1].min(), a[:, 0].max(), a[:, 1].max())
+
+
+def ne_data():
+    """Суша, озёра (с историческим Аралом), реки и рельеф. None — если данных нет (тогда карта NASA)."""
+    if "ok" in _NE:
+        return _NE if _NE["ok"] else None
+    if np is None:
+        _NE["ok"] = False
+        return None
+    try:
+        def load(name):
+            with open(os.path.join(NE_DIR, name + ".geojson"), encoding="utf-8") as f:
+                return json.load(f)["features"]
+        land = []
+        for ft in load("ne_10m_land"):
+            for poly in _rings_of(ft["geometry"]):
+                rings = [_arr(r) for r in poly if len(r) >= 3]
+                if rings and rings[0][1][3] > -60:  # без Антарктиды
+                    land.append(rings)
+        lakes = []
+        for ft in load("ne_10m_lakes"):
+            p = ft["properties"]
+            if "Aral" in str(p.get("name") or "") or "Reservoir" in str(p.get("featurecla") or ""):
+                continue  # современный обмелевший Арал и водохранилища — не для исторических карт
+            for poly in _rings_of(ft["geometry"]):
+                rings = [_arr(r) for r in poly if len(r) >= 3]
+                if rings:
+                    lakes.append((float(p.get("scalerank") or 9), rings))
+        try:
+            for ft in load("ne_10m_lakes_historic"):
+                if str(ft["properties"].get("name")) in ("Aral Sea", "Lop Nur"):
+                    for poly in _rings_of(ft["geometry"]):
+                        lakes.append((0.0, [_arr(r) for r in poly if len(r) >= 3]))
+        except Exception:  # noqa: BLE001
+            pass
+        rivers = []
+        for ft in load("ne_10m_rivers_lake_centerlines"):
+            sr = float(ft["properties"].get("scalerank") or 9)
+            if sr > 7:
+                continue
+            for ln in _lines_of(ft["geometry"]):
+                if len(ln) >= 2:
+                    rivers.append((sr,) + _arr(ln))
+        elev = None
+        bp = os.path.join(NE_DIR, "elevation.jpg")
+        if os.path.exists(bp):
+            elev = np.asarray(Image.open(bp).convert("RGB").split()[0], dtype=np.float32) / 255.0
+        _NE.update(ok=True, land=land, lakes=lakes, rivers=rivers, elev=elev)
+        print("vector map: land", len(land), "lakes", len(lakes), "rivers", len(rivers), "relief", elev is not None)
+        return _NE
+    except Exception as e:  # noqa: BLE001
+        print("vector map unavailable:", str(e)[:200])
+        _NE["ok"] = False
+        return None
+
+
+def _box_blur(a, r):
+    """Размытие массива (3 прохода скользящего среднего ≈ гаусс)."""
+    r = int(max(1, r))
+    for _ in range(3):
+        for ax in (0, 1):
+            pad = [(0, 0), (0, 0)]
+            pad[ax] = (r + 1, r)
+            c = np.cumsum(np.pad(a, pad, mode="edge"), axis=ax, dtype=np.float64)
+            a = ((np.take(c, range(2 * r + 1, c.shape[ax]), axis=ax) - np.take(c, range(0, c.shape[ax] - 2 * r - 1), axis=ax)) / (2 * r + 1)).astype(np.float32)
+    return a
+
+
+def _hit(bb, view):
+    return not (bb[2] < view[0] or bb[0] > view[2] or bb[3] < view[1] or bb[1] > view[3])
+
+
+def _value_noise(w, h, cell, rng):
+    g = rng.random((h // cell + 3, w // cell + 3)).astype(np.float32)
+    im = Image.fromarray((g * 255).astype(np.uint8)).resize(((w // cell + 3) * cell, (h // cell + 3) * cell), Image.BICUBIC)
+    return np.asarray(im, dtype=np.float32)[:h, :w] / 255.0
+
+
+def vector_base(lon0, lat0, lon1, lat1, w, h, style="atlas", seed=7):
+    """Карта окна [lon0..lon1] × [lat1..lat0] (lat0 — верх) размером w×h пикселей."""
+    D = ne_data()
+    st = MAP_STYLES.get(style, MAP_STYLES["atlas"])
+    sx, sy = w / (lon1 - lon0), h / (lat0 - lat1)
+    ppd = sx  # пикселей на градус
+    view = (lon0 - 1, lat1 - 1, lon1 + 1, lat0 + 1)
+
+    SSb = 2  # сглаживание: контуры рисуются вдвое крупнее и уменьшаются
+
+    def proj(a):
+        return [((x - lon0) * sx * SSb, (lat0 - y) * sy * SSb) for x, y in a]
+
+    # маска суши
+    mask2 = Image.new("L", (w * SSb, h * SSb), 0)
+    md = ImageDraw.Draw(mask2)
+    for rings in D["land"]:
+        if not _hit(rings[0][1], view):
+            continue
+        md.polygon(proj(rings[0][0]), fill=255)
+        for a, bb in rings[1:]:
+            if _hit(bb, view):
+                md.polygon(proj(a), fill=0)
+    lake_max_rank = 7 if ppd > 30 else (4 if ppd > 14 else 2)
+    for sr, rings in D["lakes"]:
+        if sr > lake_max_rank or not _hit(rings[0][1], view):
+            continue
+        md.polygon(proj(rings[0][0]), fill=0)
+        for a, bb in rings[1:]:
+            md.polygon(proj(a), fill=255)
+    mask = mask2.reduce(SSb)
+    M = np.asarray(mask, dtype=np.float32) / 255.0
+    rng = np.random.default_rng(seed)
+
+    # рельеф: отмывка по карте высот
+    shade = np.zeros((h, w), np.float32)
+    hi = np.zeros((h, w), np.float32)
+    if D.get("elev") is not None:
+        E = D["elev"]
+        EH, EW = E.shape
+        ex0, ex1 = (lon0 + 180) / 360 * EW, (lon1 + 180) / 360 * EW
+        ey0, ey1 = (90 - lat0) / 180 * EH, (90 - lat1) / 180 * EH
+        pad = 4
+        X0, Y0 = int(math.floor(ex0)) - pad, int(math.floor(ey0)) - pad
+        X1, Y1 = int(math.ceil(ex1)) + pad, int(math.ceil(ey1)) + pad
+        buf = np.zeros((Y1 - Y0, X1 - X0), np.float32)
+        cx0, cy0, cx1, cy1 = max(X0, 0), max(Y0, 0), min(X1, EW), min(Y1, EH)
+        if cx1 > cx0 and cy1 > cy0:
+            buf[cy0 - Y0:cy1 - Y0, cx0 - X0:cx1 - X0] = E[cy0:cy1, cx0:cx1]
+        im = Image.fromarray(buf, mode="F").resize((w, h), Image.BICUBIC,
+                                                    box=(ex0 - X0, ey0 - Y0, ex1 - X0, ey1 - Y0))
+        el = _box_blur(np.asarray(im, np.float32), max(1.0, ppd / 20))
+        gy, gx = np.gradient(el)
+        k = 2.0 * max(ppd, 1.0)  # уклон на градус — одинаковая сила рельефа при любом масштабе
+        shade = np.clip((gx + gy) * -k, -1, 1)  # свет с северо-запада
+        hi = np.clip((el - 0.08) * 2.2, 0, 1)
+
+    def C(c):
+        return np.array(c, np.float32)[None, None, :]
+
+    land = C(st["land"]) * (1 - hi[..., None] * 0.9) + C(st["land_hi"]) * (hi[..., None] * 0.9)
+    land = land * (1 + shade[..., None] * st["shade"] * 0.5)
+    # море: чуть темнее вдали от берега + береговая «рябь» старинных карт
+    blur = np.asarray(mask.filter(ImageFilter.GaussianBlur(max(6, ppd * 0.9))), np.float32) / 255.0
+    sea = C(st["sea_deep"]) * (1 - blur[..., None]) + C(st["sea"]) * blur[..., None]
+    rip = np.zeros((h, w), np.float32)
+    bl2 = np.asarray(mask.filter(ImageFilter.GaussianBlur(max(5, min(22, ppd * 0.45)))), np.float32) / 255.0
+    for lev, a in ((0.30, 0.8), (0.16, 0.55), (0.07, 0.35)):
+        rip = np.maximum(rip, a * np.clip(1 - np.abs(bl2 - lev) / 0.018, 0, 1))
+    rip *= (1 - M)
+    sea = sea * (1 - rip[..., None]) + C(st["ripple"]) * rip[..., None]
+    img = land * M[..., None] + sea * (1 - M[..., None])
+    # бумага: крупные пятна + зерно
+    g = st["grain"]
+    if g:  # только мягкие «пятна» бумаги: мелкое зерно в видео мерцает и портит сжатие
+        n1 = _value_noise(w, h, 90, rng) - 0.5
+        img = img + (n1 * g * 1.6)[..., None]
+    out = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8), "RGB")
+    lines = Image.new("RGBA", (w * SSb, h * SSb), (0, 0, 0, 0))
+    d = ImageDraw.Draw(lines)
+    # градусная сетка (атлас)
+    if st.get("grid"):
+        step = 10 if ppd > 6 else 20
+        for lon in range(-180, 181, step):
+            if lon0 <= lon <= lon1:
+                x = (lon - lon0) * sx * SSb
+                d.line([(x, 0), (x, h * SSb)], fill=st["grid"] + (38,), width=2 * SSb)
+        for lat in range(-80, 81, step):
+            if lat1 <= lat <= lat0:
+                y = (lat0 - lat) * sy * SSb
+                d.line([(0, y), (w * SSb, y)], fill=st["grid"] + (38,), width=2 * SSb)
+    # реки
+    riv_max = 7 if ppd > 30 else (6 if ppd > 14 else 5)
+    for sr, a, bb in D["rivers"]:
+        if sr > riv_max or not _hit(bb, view):
+            continue
+        wd = max(2, int(round(SSb * (3.2 if sr <= 3 else 2.4 if sr <= 5 else 1.6) * min(1.6, max(0.6, ppd / 18)))))
+        d.line(proj(a), fill=st["river"] + (230,), width=wd, joint="curve")
+    lines = lines.reduce(SSb)
+    out.paste(lines, (0, 0), lines)
+    # береговая линия (по маске двойного разрешения — гладкая)
+    edge = mask2.filter(ImageFilter.FIND_EDGES).point(lambda v: 255 if v > 60 else 0)
+    edge = edge.filter(ImageFilter.MaxFilter(5 if ppd > 20 else 3)).reduce(SSb)
+    coast = Image.new("RGBA", (w, h), st["coast"] + (0,))
+    coast.putalpha(edge.point(lambda v: int(v * 0.8)))
+    if style == "dark":
+        glow = coast.filter(ImageFilter.GaussianBlur(4))
+        out.paste(glow, (0, 0), glow)
+    out.paste(coast, (0, 0), coast)
+    return out, mask
+
+
+def water_labels(draw, lon0, lat0, lon1, lat1, w, h, style, font_fn, ok=None):
+    """Подписи морей/рек курсивом — в фон, под территориями и стрелками; без наложений."""
+    st = MAP_STYLES.get(style, MAP_STYLES["atlas"])
+    sx, sy = w / (lon1 - lon0), h / (lat0 - lat1)
+    ppd = sx
+    placed = []
+    for name, lat, lon, kind in sorted(WATER_LABELS, key=lambda r: (1, 2, 0).index(r[3])):
+        if not (lon0 < lon < lon1 and lat1 < lat < lat0):
+            continue
+        if kind == 0 and ppd > 40:
+            continue  # океаны — только на крупных картах
+        if (kind == 1 and ppd < 12) or (kind == 2 and ppd < 16):
+            continue  # моря поменьше и реки — только при приближении
+        size = 34 if kind == 0 else (30 if kind == 1 else 26)
+        f = font_fn(size)
+        tw = draw.textlength(name, font=f)
+        x, y = (lon - lon0) * sx - tw / 2, (lat0 - lat) * sy - size / 2
+        bx = (x - 10, y - 8, x + tw + 10, y + size + 8)
+        if bx[0] < 0 or bx[2] > w or bx[1] < 0 or bx[3] > h:
+            continue
+        if any(not (bx[2] < q[0] or bx[0] > q[2] or bx[3] < q[1] or bx[1] > q[3]) for q in placed):
+            continue
+        if ok is not None and not ok(bx):
+            continue
+        placed.append(bx)
+        draw.text((x, y), name, font=f, fill=st["label"] + (235,))
+
+
+def font_italic(size):
+    for p in (os.path.join(FONT_DIR, "PlayfairItalic.ttf"),
+              "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"):
+        if os.path.exists(p) and os.path.getsize(p) > 10000:
+            return _font(p, size, 500 if "Playfair" in p else None)
+    return font_title(size)
+
+
 def map_points(m):
     pts = []
     for p in (m or {}).get("points", [])[:6]:
@@ -587,55 +876,299 @@ def map_points(m):
     return pts
 
 
-class MapScene:
-    """Анимированная карта: камера плавно приближается, маршрут прорисовывается, города появляются по ходу."""
+# Примерные границы держав (широта, долгота). Грубые контуры для наглядности — в кадре подпись «границы примерные».
+TERRITORIES = {
+    "mongol_1206": ("Монгольское государство", "1206", [(50.5, 88), (52, 95), (52, 105), (51, 112), (50, 118), (48, 120), (45, 118), (42, 112), (41, 104), (42, 96), (44, 90), (47, 87)]),
+    "jin_1206": ("Империя Цзинь", "1206", [(48, 118), (52, 124), (50, 132), (45, 135), (41, 130), (39, 124), (37, 122), (34, 120), (32.5, 116), (33, 111), (34.5, 106), (38, 107), (41, 110), (43, 114), (45, 117)]),
+    "xixia_1206": ("Си Ся (тангуты)", "1206", [(42, 97), (41, 104), (39, 107), (36, 106), (35, 103), (37, 99), (39, 96), (41, 95)]),
+    "khwarezm_1215": ("Хорезм", "1215", [(44, 60), (45, 66), (43.5, 70), (41, 72), (38, 71), (36, 70), (34, 68), (30, 66), (26, 62), (26, 56), (28, 52), (31, 48), (35, 47), (38, 48), (40, 53), (42, 56)]),
+    "mongol_1227": ("Империя Чингисхана", "1227", [(52, 62), (53, 80), (53, 100), (52, 115), (49, 122), (43, 122), (40, 117), (38, 110), (37, 103), (39, 96), (37, 86), (36, 74), (34, 67), (35, 59), (38, 54), (42, 52), (47, 52), (50, 55)]),
+    "mongol_1279": ("Монгольская империя", "1279", [(56, 28), (60, 40), (60, 55), (57, 70), (55, 85), (53, 100), (53, 115), (53, 128), (45, 135), (40, 128), (31, 122), (24, 118), (22, 110), (22, 103), (26, 98), (29, 92), (30, 80), (33, 72), (31, 66), (27, 62), (26, 56), (29, 50), (32, 46), (34, 43), (37, 40), (40, 42), (42, 45), (44, 40), (46, 34), (48, 28), (52, 25)]),
+    "golden_horde_1300": ("Золотая Орда", "XIV в.", [(47.5, 29), (50, 32), (53, 38), (56, 45), (56.5, 52), (56, 60), (55, 68), (53, 77), (49, 80), (45, 78), (43, 72), (43.5, 66), (42, 60), (41.5, 58), (43, 52), (44, 47), (43, 44), (44.5, 38), (44.5, 34), (45.5, 30)]),
+    "chagatai_1300": ("Улус Чагатая", "XIV в.", [(46, 70), (47, 78), (45, 85), (43, 92), (40, 92), (37, 85), (36, 77), (37, 72), (36, 67), (37.5, 63), (40, 63), (42, 66), (44, 68)]),
+    "ilkhanate_1300": ("Хулагуиды", "XIV в.", [(40, 40), (41, 48), (38, 54), (37, 62), (35, 65), (30, 64), (25, 61), (26, 54), (29, 50), (31, 47), (33, 44), (36, 40), (37, 37), (39, 38)]),
+    "yuan_1300": ("Империя Юань", "XIV в.", [(52, 90), (53, 110), (53, 128), (45, 135), (40, 128), (36, 121), (31, 122), (24, 118), (22, 110), (21, 103), (25, 98), (29, 92), (32, 80), (36, 78), (42, 88), (47, 88)]),
+    "moghulistan_1400": ("Моголистан", "XV в.", [(46, 74), (47, 80), (45, 85), (43, 90), (40, 90), (37.5, 80), (38.5, 74), (40, 71), (42, 70), (44, 71)]),
+    "abulkhair_1450": ("Ханство Абулхаира", "XV в.", [(54, 55), (55, 65), (54, 72), (51, 74), (48, 72), (45, 69), (43.5, 66), (43, 61), (45, 57), (48, 53), (51, 52)]),
+    "kazakh_khanate_1600": ("Казахское ханство", "XVI–XVII вв.", [(52, 51), (55, 60), (55, 70), (53, 78), (50, 84), (47, 83), (45, 80), (43, 77), (42, 71), (41, 69), (43, 64), (44, 59), (46, 54), (48, 50)]),
+}
+TERR_COLORS = [(214, 64, 52), (233, 196, 106), (64, 140, 160), (150, 90, 170), (230, 130, 50), (90, 160, 90)]
+# на светлом пергаменте нужны более густые цвета
+TERR_COLORS_LIGHT = [(196, 44, 36), (34, 104, 168), (46, 132, 70), (128, 62, 152), (214, 112, 20), (120, 84, 50)]
 
-    def __init__(self, m, n):
-        W = world_map()
+
+def _ll(v):
+    try:
+        lat, lon = float(v[0]), float(v[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        try:
+            lat, lon = float(v.get("lat")), float(v.get("lon"))
+        except Exception:  # noqa: BLE001
+            return None
+    if -80 <= lat <= 82 and -180 <= lon <= 180:
+        return (lat, lon)
+    return None
+
+
+def _chaikin(poly, it=3):
+    """Сглаживание ломаных контуров держав (срез углов), чтобы границы выглядели естественно."""
+    for _ in range(it):
+        out = []
+        for i in range(len(poly)):
+            a, b = poly[i], poly[(i + 1) % len(poly)]
+            out.append((0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]))
+            out.append((0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]))
+        poly = out
+    return poly
+
+
+def map_territories(m):
+    out = []
+    for i, t in enumerate((m or {}).get("territories", [])[:5]):
+        if isinstance(t, str):
+            t = {"key": t}
+        if not isinstance(t, dict):
+            continue
+        key = str(t.get("key") or "").strip()
+        if key in TERRITORIES:
+            name, year, poly = TERRITORIES[key]
+            fam = key.split("_")[0]  # mongol_1206 → mongol_1227 → mongol_1279: одна держава растёт
+        else:
+            poly = [p for p in (_ll(v) for v in (t.get("polygon") or [])) if p]
+            name, year = str(t.get("name") or ""), str(t.get("year") or "")
+            fam = "custom%d" % i
+        if len(poly) >= 3:
+            out.append({"name": str(t.get("name") or name)[:30], "year": str(t.get("year") or year)[:14],
+                        "poly": _chaikin(list(poly)), "fam": fam})
+    return out
+
+
+def map_arrows(m):
+    out = []
+    for a in (m or {}).get("arrows", [])[:4]:
+        if not isinstance(a, dict):
+            continue
+        pts = [p for p in (_ll(v) for v in (a.get("points") or [])) if p]
+        if not pts:
+            f, t = _ll(a.get("from") or []), _ll(a.get("to") or [])
+            pts = [p for p in (f, t) if p]
+        if len(pts) >= 2:
+            out.append({"pts": pts, "label": str(a.get("label") or "")[:26]})
+    return out
+
+
+def has_map(m):
+    return bool(m) and bool(map_points(m) or map_territories(m) or map_arrows(m))
+
+
+class MapScene:
+    """Анимированная карта: территории держав заливаются по очереди (рост империи),
+    стрелки походов прорисовываются, города появляются по ходу, камера плавно приближается."""
+
+    def __init__(self, m, n, style=None):
+        style = str(style or m.get("style") or MAP_STYLE)
+        D = ne_data() if style != "nasa" else None
+        W = None if D else world_map()
+        if D is None and W is None:
+            raise RuntimeError("no world map")
+        Wd, Ht = (5400, 2700) if D else W.size
         self.n = n
         self.pts = map_points(m)
-        self.route = bool(m.get("route", True)) and len(self.pts) > 1
+        self.terrs = map_territories(m)
+        self.arrows = map_arrows(m)
+        self.route = bool(m.get("route", True)) and len(self.pts) > 1 and not self.arrows
         self.title = str(m.get("title") or "").upper()[:42]
-        Wd, Ht = W.size
-        xy = [((p["lon"] + 180) / 360 * Wd, (90 - p["lat"]) / 180 * Ht) for p in self.pts]
-        xs, ys = [a for a, _ in xy], [b for _, b in xy]
-        span_w = max((max(xs) - min(xs)) * 1.3, Wd * 22 / 360)
-        span_h = max((max(ys) - min(ys)) * 1.5, span_w * VH / VW)
-        span_h = min(span_h, Ht * 0.95)
-        span_w = span_h * VW / VH
-        cx = (min(xs) + max(xs)) / 2
-        cy = (min(ys) + max(ys)) / 2 + span_h * 0.08  # точки чуть выше центра — ниже субтитры
+        P = lambda la, lo: ((lo + 180) / 360 * Wd, (90 - la) / 180 * Ht)
+        allxy = [P(p["lat"], p["lon"]) for p in self.pts]
+        for t in self.terrs:
+            t["wxy"] = [P(la, lo) for la, lo in t["poly"]]
+            allxy += t["wxy"]
+        for a in self.arrows:
+            a["wxy"] = [P(la, lo) for la, lo in a["pts"]]
+            allxy += a["wxy"]
+        xs, ys = [a for a, _ in allxy], [b for _, b in allxy]
+        # Всё, что нужно показать, вписываем в «окно» кадра между заголовком и субтитрами (980×880 px),
+        # остальная часть вертикального кадра — продолжение карты.
+        cw = max((max(xs) - min(xs)) * 1.12, 1.0)
+        ch = max((max(ys) - min(ys)) * 1.12, 1.0)
+        scale = min(980 / cw, 880 / ch, VW / (Wd * 20 / 360))
+        ccx, ccy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        ax, ay = VW / 2, 820
         def box(k):
-            w, h = span_w * k, span_h * k
-            x0 = min(max(cx - w / 2, 0), Wd - w)
-            y0 = min(max(cy - h / 2, 0), Ht - h)
-            return (x0, y0, x0 + w, y0 + h)
-        self.b1, self.b2 = box(1.22), box(1.0)
-        ox0, oy0 = min(self.b1[0], self.b2[0]), min(self.b1[1], self.b2[1])
-        ox1, oy1 = max(self.b1[2], self.b2[2]), max(self.b1[3], self.b2[3])
-        self.off = (int(ox0), int(oy0))
-        self.sub = W.crop((int(ox0), int(oy0), int(ox1) + 1, int(oy1) + 1))
-        self.xy = xy
-        seg = [math.dist(xy[i], xy[i + 1]) for i in range(len(xy) - 1)]
+            sc = scale / k
+            x0, y0 = ccx - ax / sc, ccy - ay / sc
+            return (x0, y0, x0 + VW / sc, y0 + VH / sc)
+        self.b1, self.b2 = box(1.15), box(1.0)
+        X0, Y0 = int(math.floor(self.b1[0])), int(math.floor(self.b1[1]))
+        X1, Y1 = int(math.ceil(self.b1[2])) + 1, int(math.ceil(self.b1[3])) + 1
+        self.f = 1.0
+        self.land = None  # маска суши: заливки держав не заходят в моря
+        if D:
+            # векторная карта рисуется сразу в разрешении кадра
+            sw, sh = int(round((X1 - X0) * scale)), int(round((Y1 - Y0) * scale))
+            lon0, lon1 = X0 / Wd * 360 - 180, X1 / Wd * 360 - 180
+            lat0, lat1 = 90 - Y0 / Ht * 180, 90 - Y1 / Ht * 180
+            sub, self.land = vector_base(lon0, lat0, lon1, lat1, sw, sh, style)
+            self.f = fs = sw / (X1 - X0)
+
+            def inside(bx):  # подпись не должна попадать под заголовок и субтитры ни в начале, ни в конце наезда
+                for bb in (self.b1, self.b2):
+                    k = VW / (bb[2] - bb[0])
+                    fx0, fx1 = (bx[0] / fs + X0 - bb[0]) * k, (bx[2] / fs + X0 - bb[0]) * k
+                    fy0, fy1 = (bx[1] / fs + Y0 - bb[1]) * k, (bx[3] / fs + Y0 - bb[1]) * k
+                    if fx0 < 30 or fx1 > VW - 30 or fy0 < 390 or fy1 > VH * 0.64:
+                        return False
+                return True
+            water_labels(ImageDraw.Draw(sub, "RGBA"), lon0, lat0, lon1, lat1, sw, sh, style, font_italic, inside)
+            ix0 = ix1 = 0
+        else:
+            sub = Image.new("RGB", (X1 - X0, Y1 - Y0), (34, 27, 20))
+            ix0, iy0, ix1, iy1 = max(X0, 0), max(Y0, 0), min(X1, Wd), min(Y1, Ht)
+        if ix1 > ix0 and iy1 > iy0:
+            sub.paste(W.crop((ix0, iy0, ix1, iy1)), (ix0 - X0, iy0 - Y0))
+            # край карты (полюса) не обрываем резкой линией — мягко растворяем в тёмный фон
+            F = int(min(300 / scale, 20 * Ht / 180))
+            if F > 4:
+                ramp = Image.linear_gradient("L").resize((ix1 - ix0, F))  # 0 сверху → 255 снизу
+                fill = Image.new("RGB", (ix1 - ix0, F), (34, 27, 20))
+                if Y0 < 0:
+                    y = iy0 - Y0
+                    sub.paste(fill, (ix0 - X0, y), ImageOps.invert(ramp))
+                if Y1 > Ht:  # снизу — Антарктида: растворяем глубже
+                    Fb = int(min(500 / scale, 35 * Ht / 180))
+                    rb = Image.linear_gradient("L").resize((ix1 - ix0, Fb))
+                    sub.paste(Image.new("RGB", (ix1 - ix0, Fb), (34, 27, 20)), (ix0 - X0, iy1 - Y0 - Fb), rb)
+        self.sub, self.off = sub, (X0, Y0)
+        self.xy = [P(p["lat"], p["lon"]) for p in self.pts]
+        seg = [math.dist(self.xy[i], self.xy[i + 1]) for i in range(len(self.xy) - 1)]
         self.total = sum(seg) or 1
         acc, self.at = 0, [0.0]
         for d in seg:
             acc += d
             self.at.append(acc / self.total)
+        # расписание: территории → стрелки → города
+        nt, na = len(self.terrs), len(self.arrows)
+        self.t_terr = [0.05 + i * (0.45 / max(1, nt)) for i in range(nt)]
+        a0 = 0.15 if nt == 0 else 0.3
+        self.t_arrow = [(a0 + i * (0.5 / max(1, na)), a0 + (i + 1) * (0.5 / max(1, na))) for i in range(na)]
+        self.light = bool(D) and style == "atlas"
         self.lf = font_sans(40, 800)
         self.tf = font_sans(46, 900)
+        self.sf = font_sans(26, 600)
+        self.yf = font_title(88)
+
+    @staticmethod
+    def _bez(p0, p1, bend=0.18):
+        """Плавная дуга между двумя точками (для стрелок походов)."""
+        mx, my = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        c = (mx - dy * bend, my + dx * bend)
+        return [((1 - s) ** 2 * p0[0] + 2 * (1 - s) * s * c[0] + s * s * p1[0],
+                 (1 - s) ** 2 * p0[1] + 2 * (1 - s) * s * c[1] + s * s * p1[1]) for s in [i / 24 for i in range(25)]]
+
+    def _arrow(self, d, pts, prog, color, k=1):
+        path = []
+        for i in range(len(pts) - 1):
+            path += self._bez(pts[i], pts[i + 1])[(1 if i else 0):]
+        cut = max(2, int(len(path) * prog))
+        part = path[:cut]
+        if len(part) < 2:
+            return
+        d.line(part, fill=(0, 0, 0, 170), width=24 * k, joint="curve")
+        d.line(part, fill=color + (255,), width=14 * k, joint="curve")
+        a, c = part[-2], part[-1]
+        ang = math.atan2(c[1] - a[1], c[0] - a[0])
+        L = max(24 * k, min(46 * k, 0.3 * math.dist(path[0], path[-1])))
+        tri = [(c[0] + 10 * k * math.cos(ang), c[1] + 10 * k * math.sin(ang)),
+               (c[0] - L * math.cos(ang - 0.5), c[1] - L * math.sin(ang - 0.5)),
+               (c[0] - L * math.cos(ang + 0.5), c[1] - L * math.sin(ang + 0.5))]
+        d.polygon(tri, fill=color + (255,), outline=(0, 0, 0, 200))
 
     def frame(self, fi):
         t = fi / max(1, self.n - 1)
         e = t * t * (3 - 2 * t)
         b = [self.b1[i] + (self.b2[i] - self.b1[i]) * e for i in range(4)]
         ox, oy = self.off
-        # субпиксельная камера: без целочисленного округления карта движется плавно, без рывков
-        img = self.sub.resize((VW, VH), Image.BICUBIC, box=safe_box(self.sub, b[0] - ox, b[1] - oy, b[2] - ox, b[3] - oy))
-        img = img.convert("RGBA")
+        f = self.f
+        cam = safe_box(self.sub, (b[0] - ox) * f, (b[1] - oy) * f, (b[2] - ox) * f, (b[3] - oy) * f)
+        img = self.sub.resize((VW, VH), Image.BICUBIC, box=cam).convert("RGBA")
         sx, sy = VW / (b[2] - b[0]), VH / (b[3] - b[1])
-        P = [((x - b[0]) * sx, (y - b[1]) * sy) for x, y in self.xy]
+        S = lambda p: ((p[0] - b[0]) * sx, (p[1] - b[1]) * sy)
+        K = 2  # сглаживание: заливки, стрелки и точки рисуются вдвое крупнее и уменьшаются
+        S2 = lambda p: ((p[0] - b[0]) * sx * K, (p[1] - b[1]) * sy * K)
+        # территории (полупрозрачная заливка на отдельном слое)
+        year_now = ""
+        # прежние границы той же державы (рост империи) уходят на второй план, подпись остаётся только у новой
+        sup = [0.0] * len(self.terrs)
+        for i, tr in enumerate(self.terrs):
+            for j in range(i + 1, len(self.terrs)):
+                if self.terrs[j]["fam"] == tr["fam"]:
+                    sup[i] = max(sup[i], min(1.0, max(0.0, (t - self.t_terr[j]) / 0.12)))
+        if self.terrs:
+            layer = Image.new("RGBA", (VW * K, VH * K), (0, 0, 0, 0))
+            for i, tr in enumerate(self.terrs):
+                a = min(1.0, max(0.0, (t - self.t_terr[i]) / 0.12))
+                if a <= 0:
+                    continue
+                pal = TERR_COLORS_LIGHT if self.light else TERR_COLORS
+                col = pal[i % len(pal)]
+                poly = [S2(p) for p in tr["wxy"]]
+                k = 1.0 - 0.6 * sup[i]
+                # каждая держава — на своём кусочке слоя, затем смешивание (иначе новая заливка стирает прежнюю)
+                lw = (6 if sup[i] < 0.5 else 3) * K
+                x0 = int(max(0, min(p[0] for p in poly) - lw)); y0 = int(max(0, min(p[1] for p in poly) - lw))
+                x1 = int(min(VW * K, max(p[0] for p in poly) + lw + 1)); y1 = int(min(VH * K, max(p[1] for p in poly) + lw + 1))
+                if a >= 0.5:
+                    year_now = tr["year"] or year_now
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                piece = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+                pd = ImageDraw.Draw(piece)
+                lp = [(x - x0, y - y0) for x, y in poly]
+                pd.polygon(lp, fill=col + (int((105 if self.light else 95) * a * k),))
+                pd.line(lp + [lp[0]], fill=col + (int(255 * a * k),), width=lw, joint="curve")
+                layer.alpha_composite(piece, (x0, y0))
+            layer = layer.reduce(K)
+            if self.land is not None:
+                lm = self.land.resize((VW, VH), Image.BILINEAR, box=cam)
+                layer.putalpha(ImageChops.multiply(layer.getchannel("A"), lm))
+            img.alpha_composite(layer)
+        geo = Image.new("RGBA", (VW * K, VH * K), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(geo)
         d = ImageDraw.Draw(img)
+        tlabels, texts = [], []  # подписи рисуются после геометрии, поверх неё
+        # стрелки походов
+        for i, ar in enumerate(self.arrows):
+            s0, s1 = self.t_arrow[i]
+            prog = min(1.0, max(0.0, (t - s0) / max(0.05, s1 - s0)))
+            if prog > 0:
+                self._arrow(gd, [S2(p) for p in ar["wxy"]], prog, RED, K)
+                if prog >= 1 and ar["label"]:
+                    p0, p1 = S(ar["wxy"][0]), S(ar["wxy"][-1])
+                    mx, my = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+                    ln = math.dist(p0, p1) or 1.0
+                    nx, ny = -(p1[1] - p0[1]) / ln, (p1[0] - p0[0]) / ln  # перпендикуляр к стрелке
+                    lab = ar["label"].upper()
+                    tw = d.textlength(lab, font=self.sf)
+                    avoid = [(x - 34, y - 34, x + 34, y + 34) for x, y in (S(p) for p in self.xy)] + tlabels
+                    best = None
+                    for dist in (46, 74, 104):
+                        for sg in (-1, 1):
+                            cx, cy = mx + nx * dist * sg, my + ny * dist * sg
+                            lx, ly = min(max(cx - tw / 2, 30), VW - 30 - tw), cy - 18
+                            bx = (lx - 4, ly - 4, lx + tw + 4, ly + 36)
+                            if not any(not (bx[2] < q[0] or bx[0] > q[2] or bx[3] < q[1] or bx[1] > q[3]) for q in avoid):
+                                best = (lx, ly, bx)
+                                break
+                        if best:
+                            break
+                    if best is None:
+                        lx, ly = min(max(mx - tw / 2, 30), VW - 30 - tw), my - 58
+                        best = (lx, ly, (lx - 4, ly - 4, lx + tw + 4, ly + 36))
+                    texts.append((best[:2], lab, self.sf, GOLD, 5))
+                    tlabels.append(best[2])
+        # маршрут по городам (если нет отдельных стрелок)
+        P = [S(p) for p in self.xy]
         prog = min(1.0, max(0.0, (t - 0.08) / 0.7)) if self.route else 1.0
         if self.route and prog > 0:
             pts, tip = [P[0]], P[0]
@@ -648,44 +1181,72 @@ class MapScene:
                     pts.append(tip)
                     break
             if len(pts) > 1:
-                d.line(pts, fill=(0, 0, 0, 160), width=18, joint="curve")
-                d.line(pts, fill=RED + (255,), width=10, joint="curve")
-                a, c = pts[-2], pts[-1]
-                ang = math.atan2(c[1] - a[1], c[0] - a[0])
-                L = 34
-                d.polygon([c, (c[0] - L * math.cos(ang - 0.45), c[1] - L * math.sin(ang - 0.45)),
-                           (c[0] - L * math.cos(ang + 0.45), c[1] - L * math.sin(ang + 0.45))], fill=RED + (255,))
-        vis = [((prog >= self.at[k] - 1e-6) if self.route else (t >= 0.08 + k * 0.12)) for k in range(len(P))]
-        placed = [(x - 22, y - 22, x + 22, y + 22) for k, (x, y) in enumerate(P) if vis[k]]
+                self._arrow(gd, [(x * K, y * K) for x, y in pts], 1.0, RED, K)
+        # города
+        start = 0.08 if not self.terrs else 0.35
+        vis = [((prog >= self.at[k] - 1e-6) if self.route else (t >= start + k * 0.1)) for k in range(len(P))]
+        placed = [(x - 22, y - 22, x + 22, y + 22) for k, (x, y) in enumerate(P) if vis[k]] + tlabels
         for k, (x, y) in enumerate(P):
             if not vis[k]:
                 continue
-            r = 15
-            d.ellipse((x - r - 4, y - r - 4, x + r + 4, y + r + 4), fill=(0, 0, 0, 150))
-            d.ellipse((x - r, y - r, x + r, y + r), fill=GOLD + (255,), outline=(255, 255, 255, 255), width=4)
+            r, X, Y = 15 * K, x * K, y * K
+            gd.ellipse((X - r - 4 * K, Y - r - 4 * K, X + r + 4 * K, Y + r + 4 * K), fill=(0, 0, 0, 150))
+            gd.ellipse((X - r, Y - r, X + r, Y + r), fill=GOLD + (255,), outline=(255, 255, 255, 255), width=4 * K)
             name = self.pts[k]["name"].upper()
-            if name:
-                tw = d.textlength(name, font=self.lf)
-                best = None
-                for dy in (-26, -80, 28, -134, 82):
-                    for right in (True, False):
-                        tx = x + 30 if right else x - 30 - tw
-                        if tx < 30 or tx + tw > VW - 30:
-                            continue
-                        boxr = (tx - 6, y + dy - 6, tx + tw + 6, y + dy + 52)
-                        if not any(not (boxr[2] < q[0] or boxr[0] > q[2] or boxr[3] < q[1] or boxr[1] > q[3]) for q in placed):
-                            best = (tx, y + dy, boxr)
-                            break
-                    if best:
+            if not name:
+                continue
+            tw = d.textlength(name, font=self.lf)
+            best = None
+            for dy in (-26, -80, 28, -134, 82):
+                for right in (True, False):
+                    tx = x + 30 if right else x - 30 - tw
+                    if tx < 30 or tx + tw > VW - 30:
+                        continue
+                    boxr = (tx - 6, y + dy - 6, tx + tw + 6, y + dy + 52)
+                    if not any(not (boxr[2] < q[0] or boxr[0] > q[2] or boxr[3] < q[1] or boxr[1] > q[3]) for q in placed):
+                        best = (tx, y + dy, boxr)
                         break
-                if best is None:
-                    tx = x + 30 if x + 30 + tw < VW - 30 else x - 30 - tw
-                    best = (tx, y - 26, (tx, y - 26, tx + tw, y + 26))
-                placed.append(best[2])
-                d.text((best[0], best[1]), name, font=self.lf, fill=WHITE, stroke_width=6, stroke_fill=(0, 0, 0))
+                if best:
+                    break
+            if best is None:
+                tx = x + 30 if x + 30 + tw < VW - 30 else x - 30 - tw
+                best = (tx, y - 26, (tx, y - 26, tx + tw, y + 26))
+            placed.append(best[2])
+            texts.append(((best[0], best[1]), name, self.lf, WHITE, 6))
+        img.alpha_composite(geo.reduce(K))
+        for xy, txt, fnt, col, sw in texts:
+            d.text(xy, txt, font=fnt, fill=col, stroke_width=sw, stroke_fill=(0, 0, 0))
+        # подписи держав — после городов и стрелок, не налезая на них
+        for i in reversed(range(len(self.terrs))):
+            tr = self.terrs[i]
+            if t < self.t_terr[i] + 0.04 or not tr["name"] or sup[i] > 0.5:
+                continue
+            poly = [S(p) for p in tr["wxy"]]
+            cxp = sum(p[0] for p in poly) / len(poly)
+            cyp = sum(p[1] for p in poly) / len(poly)
+            name = tr["name"].upper()
+            tw = d.textlength(name, font=self.lf)
+            x = min(max(cxp - tw / 2, 30), VW - 30 - tw)
+            for dy in (0, -64, 64, -128, 128):
+                y = min(max(cyp - 24 + dy, 400), VH * 0.62)
+                bx = (x - 8, y - 6, x + tw + 8, y + 52)
+                if not any(not (bx[2] < q[0] or bx[0] > q[2] or bx[3] < q[1] or bx[1] > q[3]) for q in placed):
+                    placed.append(bx)
+                    d.text((x, y), name, font=self.lf, fill=(255, 244, 214), stroke_width=6, stroke_fill=(0, 0, 0))
+                    break
+        # заголовок, год, пометка о точности
         if self.title:
             tw = d.textlength(self.title, font=self.tf)
             d.text(((VW - tw) / 2, 262), self.title, font=self.tf, fill=GOLD, stroke_width=6, stroke_fill=(0, 0, 0))
+        if self.terrs:
+            note = "границы примерные"
+            tw = d.textlength(note, font=self.sf)
+            d.text(((VW - tw) / 2, 322), note, font=self.sf, fill=(235, 225, 205), stroke_width=4, stroke_fill=(0, 0, 0))
+            # крупный год — только для «роста империи», если в заголовке своей даты нет
+            if year_now and len({tr["year"] for tr in self.terrs if tr["year"]}) > 1 \
+                    and not any(ch.isdigit() for ch in self.title):
+                yw = d.textlength(year_now, font=self.yf)
+                d.text((VW - 70 - yw, 380), year_now, font=self.yf, fill=GOLD, stroke_width=6, stroke_fill=(0, 0, 0))
         return img
 
 
@@ -768,7 +1329,7 @@ def render_reel(job, out_dir):
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{VW}x{VH}", "-r", str(FPS), "-i", "-",
         "-i", audio,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high", "-pix_fmt", "yuv420p",
         "-af", "apad", "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
         "-shortest", "-movflags", "+faststart", out,
     ]
@@ -798,9 +1359,9 @@ def render_reel(job, out_dir):
                 reader = ClipReader(clips[si], n)
             except Exception as e:  # noqa: BLE001
                 print("clip reader failed", si, e)
-        elif s.get("map") and map_points(s["map"]) and world_map() is not None:
+        elif s.get("map") and has_map(s["map"]) and (ne_data() is not None or world_map() is not None):
             try:
-                mapper = MapScene(s["map"], n)
+                mapper = MapScene(s["map"], n, job.get("map_style"))
                 print("map scene", si, [p["name"] for p in mapper.pts])
             except Exception as e:  # noqa: BLE001
                 print("map scene failed", si, e)
