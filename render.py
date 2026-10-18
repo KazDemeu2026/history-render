@@ -18,6 +18,7 @@
   "audio_url": "https://...mp3"                                       # для reel
 }
 """
+import base64
 import io
 import json
 import math
@@ -368,6 +369,73 @@ def fal_clips(scenes, tmp):
                 print("ai video poll error", i, str(e)[:160])
     for i in jobs:
         print("ai video timeout", i)
+    return out
+
+
+WAN_MOTION = ("Animate this historical painting with subtle, realistic cinematic motion: a slow camera push-in, "
+              "wind moving clothes, banners and grass, drifting dust and smoke, people and horses moving naturally. "
+              "Keep the painting's style, colors and composition. No text, no new objects.")
+
+
+def wan_clips(scenes, tmp):
+    """Оживление картины первой сцены (или нескольких) моделью Wan 2.2 (Alibaba Cloud Model Studio, Сингапур).
+    Картина сцены — первый кадр. Возвращает {индекс сцены: путь к mp4}; любая ошибка — сцена останется картиной."""
+    key = os.environ.get("DASHSCOPE_KEY", "").strip()
+    if not key:
+        print("wan: skipped (no key)")
+        return {}
+    base = os.environ.get("DASHSCOPE_BASE", "https://dashscope-intl.aliyuncs.com").rstrip("/")
+    model = os.environ.get("WAN_MODEL", "wan2.2-i2v-plus")
+    res = os.environ.get("WAN_RES", "480P")
+    count = int(os.environ.get("WAN_SCENES", "1") or 1)
+    todo = [(i, s) for i, s in enumerate(scenes) if s.get("image_url") and not s.get("map")][:count]
+    hdr = {"Authorization": "Bearer " + key, "Content-Type": "application/json", "X-DashScope-Async": "enable"}
+    tasks = {}
+    for i, s in todo:
+        try:
+            img = cover(load_image(s["image_url"]), 720, 1280)  # сразу вертикальный кадр 9:16
+            buf = io.BytesIO()
+            img.save(buf, "JPEG", quality=90)
+            data = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+            prompt = (str(s.get("video_prompt") or "") + " " + WAN_MOTION).strip()[:790]
+            body = {"model": model, "input": {"prompt": prompt, "img_url": data, "negative_prompt": AI_NEG[:490]},
+                    "parameters": {"resolution": res, "prompt_extend": True, "watermark": False}}
+            r = requests.post(base + "/api/v1/services/aigc/video-generation/video-synthesis",
+                              json=body, headers=hdr, timeout=60)
+            j = r.json()
+            tid = (j.get("output") or {}).get("task_id")
+            if not tid:
+                print("wan submit failed", i, r.status_code, str(j)[:300])
+                continue
+            tasks[i] = tid
+            print("wan submitted", i, tid)
+        except Exception as e:  # noqa: BLE001
+            print("wan submit error", i, str(e)[:200])
+    out, t0 = {}, time.time()
+    while tasks and time.time() - t0 < 600:
+        time.sleep(15)
+        for i in list(tasks):
+            try:
+                st = requests.get(base + "/api/v1/tasks/" + tasks[i], headers={"Authorization": "Bearer " + key},
+                                  timeout=30).json()
+                o = st.get("output") or {}
+                status = o.get("task_status")
+                if status == "SUCCEEDED" and o.get("video_url"):
+                    path = os.path.join(tmp, f"wan_{i}.mp4")
+                    rr = requests.get(o["video_url"], timeout=180)
+                    rr.raise_for_status()
+                    with open(path, "wb") as fh:
+                        fh.write(rr.content)
+                    out[i] = path
+                    print("wan ready", i, round(time.time() - t0), "s", str(st.get("usage"))[:120])
+                    del tasks[i]
+                elif status in ("FAILED", "CANCELED", "UNKNOWN"):
+                    print("wan failed", i, str(st)[:300])
+                    del tasks[i]
+            except Exception as e:  # noqa: BLE001
+                print("wan poll error", i, str(e)[:160])
+    for i in tasks:
+        print("wan timeout", i)
     return out
 
 
@@ -1318,11 +1386,14 @@ def render_reel(job, out_dir):
     for s in scenes:
         img = load_image(s["image_url"])
         bases.append(cover(img, int(VW * 1.18), int(VH * 1.18)))
-    clips = fal_clips(scenes, tmp)
-    if not clips:
-        clips = pexels_clips(scenes, tmp, job.get("id", "x"))
-    if not clips:
-        clips = pixabay_clips(scenes, tmp, job.get("id", "x"))
+    clips = wan_clips(scenes, tmp)  # оживлённая картина в начале ролика
+    ai = fal_clips(scenes, tmp) if not clips else {}
+    for k, v in ai.items():
+        clips.setdefault(k, v)
+    if len(clips) < 2:
+        stock = pexels_clips(scenes, tmp, job.get("id", "x")) or pixabay_clips(scenes, tmp, job.get("id", "x"))
+        for k, v in stock.items():
+            clips.setdefault(k, v)
 
     out = os.path.join(out_dir, "reel.mp4")
     cmd = [
