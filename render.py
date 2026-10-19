@@ -1489,6 +1489,10 @@ def render_reel(job, out_dir):
         files.append(reel_cover(job, cover_base, brand, out_dir))
     except Exception as e:  # noqa: BLE001
         print("cover skipped:", e)
+    try:
+        files.append(reel_story(job, cover_base, brand, out_dir))
+    except Exception as e:  # noqa: BLE001
+        print("story announce skipped:", e)
     return files
 
 
@@ -1517,6 +1521,113 @@ def reel_cover(job, base, brand, out_dir):
         d.text(((VW - w) / 2, y), ln, font=f, fill=WHITE, stroke_width=3, stroke_fill=(0, 0, 0))
         y += int(size * 1.1)
     p = os.path.join(out_dir, "cover.jpg")
+    img.convert("RGB").save(p, "JPEG", quality=90, optimize=True)
+    return p
+
+# ---------------------------------------------------------------- истории (Stories)
+# Безопасные зоны Stories 1080x1920: сверху ~250 px занимают полоски и имя профиля,
+# снизу ~300 px поле «Отправить сообщение». Весь текст держим между ними.
+
+def _center_text(d, y, text, font, fill, stroke=0):
+    w = d.textlength(text, font=font)
+    d.text(((VW - w) / 2, y), text, font=font, fill=fill,
+           stroke_width=stroke, stroke_fill=(0, 0, 0) if stroke else None)
+
+
+def _story_badge(d, brand, y=250):
+    bf = font_sans(32, 700)
+    bw = d.textlength(brand.upper(), font=bf) + 32 * 0.36 * 1.5 + 32 * 0.45
+    badge(d, (VW - bw) / 2, y, brand, 32)
+
+
+def _pill(d, y, text, size=36):
+    kf = font_sans(size, 800)
+    kw = d.textlength(text, font=kf)
+    d.rounded_rectangle(((VW - kw) / 2 - 30, y, (VW + kw) / 2 + 30, y + size + 32), radius=(size + 32) // 2, fill=GOLD)
+    d.text(((VW - kw) / 2, y + 14), text, font=kf, fill=INK)
+    return y + size + 32
+
+
+def story_card(frame, brand, handle):
+    """Кадр истории: картина на весь экран, рубрика, заголовок и короткий факт."""
+    img = cover(load_image(frame["image_url"]), VW, VH).convert("RGBA")
+    img.alpha_composite(Image.new("RGBA", (VW, VH), INK + (70,)))
+    img.alpha_composite(gradient(VW, VH, 20, 245, start=0.28))
+    d = ImageDraw.Draw(img)
+    _story_badge(d, brand)
+    pad = 84
+    kicker = (frame.get("kicker") or "").upper().strip()[:34]
+    title = (frame.get("title") or "").strip()
+    text = (frame.get("text") or "").strip()
+    source = (frame.get("source") or "").strip()
+    ft, tl, ts = fit_text(d, title, font_title, VW - 2 * pad, 400, 92, 54, 1.1)
+    fb, bl, bs = fit_text(d, text, lambda s: font_sans(s, 500), VW - 2 * pad, 560, 46, 30, 1.32)
+    block = (68 + 34 if kicker else 0) + int(len(tl) * ts * 1.1) + 36 + int(len(bl) * bs * 1.32) + (90 if source else 0)
+    y = max(380, 1540 - block)
+    if kicker:
+        y = _pill(d, y, kicker) + 34
+    for ln in tl:
+        _center_text(d, y, ln, ft, WHITE, 3)
+        y += int(ts * 1.1)
+    y += 18
+    d.rectangle(((VW - 110) / 2, y, (VW + 110) / 2, y + 6), fill=GOLD)
+    y += 30
+    for ln in bl:
+        d.text((pad, y), ln, font=fb, fill=(242, 237, 226), stroke_width=1, stroke_fill=(0, 0, 0))
+        y += int(bs * 1.32)
+    if source:
+        sf = font_sans(25, 600)
+        y += 22
+        for ln in wrap(d, "Источник: " + source, sf, VW - 2 * pad)[:2]:
+            d.text((pad, y), ln, font=sf, fill=(200, 185, 150))
+            y += 34
+    if handle:
+        hf = font_sans(30, 700)
+        _center_text(d, 1590, "Больше историй в профиле " + handle, hf, GOLD)
+    return img.convert("RGB")
+
+
+def render_story(job, out_dir):
+    paths = []
+    frames = (job.get("frames") or [])[:5]
+    for i, fr in enumerate(frames):
+        im = story_card(fr, job.get("brand", "Хроники времени"), job.get("handle", ""))
+        p = os.path.join(out_dir, f"story_{i + 1:02d}.jpg")
+        im.save(p, "JPEG", quality=92, optimize=True)
+        paths.append(p)
+    if not paths:
+        raise ValueError("story job without frames")
+    return paths
+
+
+def reel_story(job, base, brand, out_dir):
+    """Анонс нового Reels для истории: кадр ролика, «Новая серия» и призыв смотреть в профиле."""
+    img = cover(base, VW, VH).convert("RGBA")
+    img.alpha_composite(Image.new("RGBA", (VW, VH), INK + (110,)))
+    img.alpha_composite(gradient(VW, VH, 20, 220, start=0.45))
+    d = ImageDraw.Draw(img)
+    _story_badge(d, brand)
+    label = (job.get("series_label") or "").strip()
+    title = (job.get("cover_title") or job.get("title") or "").strip()
+    pad = 90
+    f, lines, size = fit_text(d, title, font_title, VW - 2 * pad, 560, 104, 58, 1.1)
+    block = int(len(lines) * size * 1.1)
+    y = VH // 2 - block // 2 - 40
+    y0 = _pill(d, y - 130, "НОВАЯ СЕРИЯ")
+    if label:
+        lf = font_sans(34, 700)
+        lab = label if d.textlength(label, font=lf) < VW - 2 * pad else label[:40]
+        _center_text(d, y0 + 18, lab, lf, (235, 225, 200), 2)
+        y = max(y, y0 + 90)
+    for ln in lines:
+        _center_text(d, y, ln, f, WHITE, 3)
+        y += int(size * 1.1)
+    cf = font_sans(42, 800)
+    _center_text(d, max(y + 70, 1380), "Смотри ролик в профиле", cf, GOLD, 2)
+    handle = job.get("handle") or ""
+    if handle:
+        _center_text(d, max(y + 130, 1440), handle, font_sans(34, 700), WHITE, 2)
+    p = os.path.join(out_dir, "story.jpg")
     img.convert("RGB").save(p, "JPEG", quality=90, optimize=True)
     return p
 
@@ -1602,7 +1713,7 @@ def write_showcase(base_out, items):
     cards = []
     for it in sorted(items, key=lambda x: -float(x.get("ts", 0))):
         when = time.strftime("%d.%m %H:%M", time.gmtime(float(it.get("ts", 0)) + 5 * 3600))
-        kind = {"reel": "Reels", "voices": "Пробник голосов"}.get(it.get("type"), "Карусель")
+        kind = {"reel": "Reels", "voices": "Пробник голосов", "story": "История"}.get(it.get("type"), "Карусель")
         if it.get("type") == "voices":
             media = "".join('<div style="margin:8px 0"><b>%s</b><br><audio controls preload="none" src="%s/%s"></audio></div>' % (esc(f[3:-4].replace("_", " ")), it["id"], f) for f in it.get("files", []))
             cards.append('<section><h2>%s · %s</h2><p>%s</p>%s</section>' % (kind, when, esc(it.get("title")), media))
@@ -1700,9 +1811,12 @@ def main():
         payload = {"id": job.get("id"), "type": job.get("type"), "status": "ok"}
         if job["type"] == "reel":
             payload["video_url"] = urls[0]
-            covers = [u for u in urls[1:] if u.endswith(".jpg")]
+            covers = [u for u in urls[1:] if u.endswith("cover.jpg")] or [u for u in urls[1:] if u.endswith(".jpg") and not u.endswith("story.jpg")]
             if covers:
                 payload["cover_url"] = covers[0]
+            stories = [u for u in urls if u.endswith("story.jpg")]
+            if stories:
+                payload["story_url"] = stories[0]
         else:
             payload["image_urls"] = urls
         callback(job, payload)
@@ -1723,6 +1837,8 @@ def main():
         files = render_reel(job, out_dir)
     elif job["type"] == "voices":
         files = render_voices(job, out_dir)
+    elif job["type"] == "story":
+        files = render_story(job, out_dir)
     else:
         raise ValueError("unknown type " + str(job.get("type")))
     with open(os.path.join(out_dir, "result.json"), "w") as fh:
