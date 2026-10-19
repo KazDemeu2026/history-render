@@ -1618,9 +1618,59 @@ body{margin:0;background:#111;color:#eee;font:16px/1.4 system-ui,sans-serif;padd
 h1{color:#e9c46a;font-size:22px}h2{font-size:16px;color:#e9c46a;margin:24px 0 4px}p{margin:0 0 8px;color:#bbb}
 .row{display:flex;gap:8px;overflow-x:auto;padding-bottom:8px}.row img{height:320px;border-radius:6px}
 .row video{height:480px;border-radius:6px;background:#000}</style></head><body>
-<h1>Хроники времени — что подготовлено за последние дни</h1>""" + "".join(cards) + "</body></html>"
+<h1>Хроники времени — что подготовлено за последние дни</h1>""" + "".join(cards) + LEGAL_FOOTER + "</body></html>"
     with open(os.path.join(base_out, "index.html"), "w") as fh:
         fh.write(html)
+    write_legal(base_out)
+
+
+LEGAL_FOOTER = ('<footer style="margin-top:32px;color:#888;font-size:13px">«Хроники времени» — исторический канал '
+                '(Instagram @khronika_vremenii, YouTube «Хроники времени»). '
+                '<a style="color:#e9c46a" href="privacy.html">Политика конфиденциальности / Privacy Policy</a> · '
+                '<a style="color:#e9c46a" href="terms.html">Условия использования / Terms of Service</a></footer>')
+
+LEGAL_PAGES = {
+    "privacy.html": ("Политика конфиденциальности / Privacy Policy", """
+<p>Приложение «Khroniki Vremeni n8n» — внутренний инструмент автора канала «Хроники времени». Оно публикует
+исторические видео автора в его собственный YouTube-канал и Instagram-аккаунт через официальные API
+(YouTube Data API, Instagram Graph API).</p>
+<p>Какие данные используются: только OAuth-токен доступа к каналу автора. Токен хранится в зашифрованном виде в
+сервисе автоматизации n8n и используется только для загрузки видео, названий и описаний в этот канал.</p>
+<p>Мы не собираем, не продаём и не передаём третьим лицам персональные данные зрителей или других пользователей
+Google. Приложение не читает личные данные из аккаунта Google, кроме того, что нужно для загрузки видео.</p>
+<p>Использование данных, полученных через Google API, соответствует
+<a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>,
+включая требования Limited Use. Отозвать доступ можно в любой момент на странице
+<a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</p>
+<hr>
+<p><b>English.</b> “Khroniki Vremeni n8n” is an internal tool of the “Хроники времени” history channel. It uploads the
+owner's own videos to the owner's own YouTube channel and Instagram account via the official APIs. The only data used
+is the OAuth access token for the owner's channel, stored encrypted in the n8n automation service and used solely to
+upload videos, titles and descriptions. We do not collect, sell or share personal data of viewers or any other Google
+users. Use of information received from Google APIs adheres to the Google API Services User Data Policy, including the
+Limited Use requirements. Access can be revoked at any time at myaccount.google.com/permissions.</p>
+"""),
+    "terms.html": ("Условия использования / Terms of Service", """
+<p>«Khroniki Vremeni n8n» — частный инструмент автора канала «Хроники времени» для публикации собственных
+исторических видео в собственные аккаунты автора на YouTube и Instagram. Сторонним пользователям приложение
+не предоставляется. Контент публикуется в соответствии с правилами YouTube и Instagram; иллюстрации берутся
+из общественного достояния (Wikimedia Commons) или создаются автором.</p>
+<hr>
+<p><b>English.</b> “Khroniki Vremeni n8n” is a private tool used only by the owner of the “Хроники времени” channel to
+publish the owner's own history videos to the owner's own YouTube and Instagram accounts. It is not offered to third
+parties. Content is published in accordance with YouTube and Instagram policies.</p>
+"""),
+}
+
+
+def write_legal(base_out):
+    for name, (title, body) in LEGAL_PAGES.items():
+        page = ("""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>%s — Хроники времени</title><style>body{margin:0 auto;max-width:760px;background:#111;color:#eee;font:16px/1.55 system-ui,sans-serif;padding:16px}
+h1{color:#e9c46a;font-size:22px}a{color:#e9c46a}hr{border:0;border-top:1px solid #333;margin:24px 0}</style></head><body>
+<h1>%s</h1>%s<p><a href="index.html">← Хроники времени</a></p></body></html>""") % (title, title, body)
+        with open(os.path.join(base_out, name), "w") as fh:
+            fh.write(page)
 
 
 def main():
@@ -1660,6 +1710,13 @@ def main():
 
     # --render
     os.makedirs(out_dir, exist_ok=True)
+    if job["type"] == "site":
+        # Только пересобрать витрину и служебные страницы, без рендера.
+        with open(os.path.join(out_dir, "result.json"), "w") as fh:
+            json.dump({"files": []}, fh)
+        write_showcase(base_out, carry_over(base_out, jid))
+        print("SITE refreshed")
+        return
     if job["type"] == "carousel":
         files = render_carousel(job, out_dir)
     elif job["type"] == "reel":
