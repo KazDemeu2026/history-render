@@ -1548,12 +1548,13 @@ def _pill(d, y, text, size=36):
     return y + size + 32
 
 
-def story_card(frame, brand, handle):
-    """Кадр истории: картина на весь экран, рубрика, заголовок и короткий факт."""
-    img = cover(load_image(frame["image_url"]), VW, VH).convert("RGBA")
-    img.alpha_composite(Image.new("RGBA", (VW, VH), INK + (70,)))
-    img.alpha_composite(gradient(VW, VH, 20, 245, start=0.28))
-    d = ImageDraw.Draw(img)
+def story_layers(frame, brand, handle):
+    """Слои кадра истории: картина, затемнение и текст отдельно (для видео с плавным приближением)."""
+    bg = cover(load_image(frame["image_url"]), VW, VH).convert("RGBA")
+    shade = Image.new("RGBA", (VW, VH), INK + (70,))
+    shade.alpha_composite(gradient(VW, VH, 20, 245, start=0.28))
+    txt = Image.new("RGBA", (VW, VH), (0, 0, 0, 0))
+    d = ImageDraw.Draw(txt)
     _story_badge(d, brand)
     pad = 84
     kicker = (frame.get("kicker") or "").upper().strip()[:34]
@@ -1584,16 +1585,93 @@ def story_card(frame, brand, handle):
     if handle:
         hf = font_sans(30, 700)
         _center_text(d, 1590, "Больше историй в профиле " + handle, hf, GOLD)
-    return img.convert("RGB")
+    return bg, shade, txt
+
+
+def story_card(frame, brand, handle):
+    """Кадр истории: картина на весь экран, рубрика, заголовок и короткий факт."""
+    bg, shade, txt = story_layers(frame, brand, handle)
+    bg.alpha_composite(shade)
+    bg.alpha_composite(txt)
+    return bg.convert("RGB")
+
+
+# Фоновая музыка для историй: Pixabay, Pixabay Content License (бесплатно, без указания авторства).
+MUSIC = {
+    "kazakh": ["https://cdn.pixabay.com/audio/2026/07/05/audio_469bd6ddf4.mp3",   # Atlas • Kazakhstan
+               "https://cdn.pixabay.com/audio/2026/09/16/audio_40e31c078c.mp3"],  # Steppe Thunder
+    "kyrgyz": ["https://cdn.pixabay.com/audio/2026/07/17/audio_3ce79af73e.mp3"],  # Atlas • Kyrgyzstan
+    "uzbek": ["https://cdn.pixabay.com/audio/2026/07/14/audio_9f4d78dcb7.mp3"],   # Atlas • Uzbekistan
+    "steppe": ["https://cdn.pixabay.com/audio/2026/02/18/audio_0a13adcc1f.mp3",   # Nomads
+               "https://cdn.pixabay.com/audio/2023/04/14/audio_fd79f974b4.mp3",   # Steppe
+               "https://cdn.pixabay.com/audio/2026/07/05/audio_469bd6ddf4.mp3"],
+    "mongol": ["https://cdn.pixabay.com/audio/2026/07/08/audio_14e3737a27.mp3"],  # Atlas • Mongolia
+}
+STORY_SEC = 12
+
+
+def story_music(key, seed, tmp):
+    urls = MUSIC.get(key) or MUSIC["steppe"]
+    url = urls[sum(map(ord, str(seed))) % len(urls)]
+    path = os.path.join(tmp, "music.mp3")
+    r = requests.get(url, timeout=120, headers=BROWSER_UA)
+    r.raise_for_status()
+    with open(path, "wb") as fh:
+        fh.write(r.content)
+    dur = probe_duration(path)
+    off = max(0.0, min(dur * 0.15, dur - STORY_SEC - 2))
+    print("story music", key, url.rsplit("/", 1)[-1], "offset", round(off, 1))
+    return path, off
+
+
+def story_video(frame, brand, handle, out_path, seed):
+    """История-видео: медленное приближение картины, неподвижный текст и тематическая музыка."""
+    bg, shade, txt = story_layers(frame, brand, handle)
+    over = shade.copy()
+    over.alpha_composite(txt)
+    tmp = tempfile.mkdtemp()
+    music, off = story_music(frame.get("music") or "steppe", seed, tmp)
+    n = STORY_SEC * FPS
+    Z = 1.08
+    big = bg.convert("RGB").resize((int(VW * Z), int(VH * Z)), Image.LANCZOS)
+    fade = STORY_SEC - 1.5
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{VW}x{VH}", "-r", str(FPS), "-i", "-",
+           "-ss", f"{off:.2f}", "-t", str(STORY_SEC), "-i", music,
+           "-filter_complex", f"[1:a]afade=t=in:st=0:d=1,afade=t=out:st={fade}:d=1.5,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100[a]",
+           "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", out_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    for i in range(n):
+        k = i / max(1, n - 1)
+        s = 1.0 + (Z - 1.0) * (1 - (1 - k) ** 2) * 0.999
+        cw, ch = big.width / s, big.height / s
+        l, t = (big.width - cw) / 2, (big.height - ch) / 2
+        fr = big.resize((VW, VH), Image.BILINEAR, box=(l, t, l + cw, t + ch)).convert("RGBA")
+        fr.alpha_composite(over)
+        proc.stdin.write(fr.convert("RGB").tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise RuntimeError("ffmpeg story failed")
+    return out_path
 
 
 def render_story(job, out_dir):
     paths = []
     frames = (job.get("frames") or [])[:5]
+    brand, handle = job.get("brand", "Хроники времени"), job.get("handle", "")
     for i, fr in enumerate(frames):
-        im = story_card(fr, job.get("brand", "Хроники времени"), job.get("handle", ""))
+        im = story_card(fr, brand, handle)
         p = os.path.join(out_dir, f"story_{i + 1:02d}.jpg")
         im.save(p, "JPEG", quality=92, optimize=True)
+        if job.get("video"):
+            try:
+                paths.append(story_video(fr, brand, handle, os.path.join(out_dir, f"story_{i + 1:02d}.mp4"), str(job.get("id")) + str(i)))
+            except Exception as e:  # noqa: BLE001
+                print("story video skipped:", e)
+                try:
+                    os.remove(os.path.join(out_dir, f"story_{i + 1:02d}.mp4"))
+                except OSError:
+                    pass
         paths.append(p)
     if not paths:
         raise ValueError("story job without frames")
@@ -1817,6 +1895,9 @@ def main():
             stories = [u for u in urls if u.endswith("story.jpg")]
             if stories:
                 payload["story_url"] = stories[0]
+        elif job["type"] == "story":
+            payload["video_urls"] = [u for u in urls if u.endswith(".mp4")]
+            payload["image_urls"] = [u for u in urls if u.endswith(".jpg")]
         else:
             payload["image_urls"] = urls
         callback(job, payload)
