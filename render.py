@@ -1569,7 +1569,7 @@ def story_card(frame, brand, handle):
     for ln in tl:
         _center_text(d, y, ln, ft, WHITE, 3)
         y += int(ts * 1.1)
-    y += 18
+    y += 34
     d.rectangle(((VW - 110) / 2, y, (VW + 110) / 2, y + 6), fill=GOLD)
     y += 30
     for ln in bl:
