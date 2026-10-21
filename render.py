@@ -439,6 +439,33 @@ def wan_clips(scenes, tmp):
     return out
 
 
+# Учёт уже использованных стоковых видео: файл used_media.json живёт на GitHub Pages и переносится в каждый новый сайт.
+_USED = {"loaded": False, "ids": []}
+
+
+def used_media():
+    if not _USED["loaded"]:
+        _USED["loaded"] = True
+        base = (os.environ.get("SITE_BASE") or "").rstrip("/") + "/"
+        if base != "/":
+            for attempt in range(3):
+                try:
+                    r = requests.get(base + "used_media.json", params={"t": int(time.time())}, timeout=30)
+                    if r.status_code == 200:
+                        _USED["ids"] = list(r.json().get("ids", []))
+                    break
+                except Exception as e:  # noqa: BLE001
+                    print("used_media not loaded:", e)
+                    time.sleep(3)
+    return _USED["ids"]
+
+
+def mark_used(mid):
+    ids = used_media()
+    if mid not in ids:
+        ids.append(mid)
+
+
 def pexels_clips(scenes, tmp, seed="x"):
     """Бесплатные стоковые видео Pexels для сцен с полем stock_query (обычно первые две)."""
     key = os.environ.get("PEXELS_KEY", "").strip()
@@ -455,7 +482,7 @@ def pexels_clips(scenes, tmp, seed="x"):
             r.raise_for_status()
             cands = []
             for v in r.json().get("videos", []):
-                if v.get("id") in used or (v.get("duration") or 0) < 4:
+                if v.get("id") in used or ("pexels:%s" % v.get("id")) in used_media() or (v.get("duration") or 0) < 4:
                     continue
                 files = [f for f in v.get("video_files", []) if (f.get("height") or 0) >= 1280 and (f.get("width") or 9999) < (f.get("height") or 0)]
                 if files:
@@ -464,7 +491,7 @@ def pexels_clips(scenes, tmp, seed="x"):
             if not cands:
                 print("pexels: nothing for", q)
                 continue
-            vid, link = rng.choice(cands[:5])
+            vid, link = rng.choice(cands[:6])
             used.add(vid)
             path = os.path.join(tmp, f"stock_{i}.mp4")
             rr = requests.get(link, timeout=180)
@@ -472,6 +499,7 @@ def pexels_clips(scenes, tmp, seed="x"):
             with open(path, "wb") as fh:
                 fh.write(rr.content)
             out[i] = path
+            mark_used("pexels:%s" % vid)
             print("pexels ok", i, q, vid)
         except Exception as e:  # noqa: BLE001
             print("pexels failed", i, q, str(e)[:200])
@@ -494,7 +522,7 @@ def pixabay_clips(scenes, tmp, seed="x"):
             r.raise_for_status()
             cands = []
             for h in r.json().get("hits", []):
-                if h.get("id") in used or (h.get("duration") or 0) < 4:
+                if h.get("id") in used or ("pixabay:%s" % h.get("id")) in used_media() or (h.get("duration") or 0) < 4:
                     continue
                 vids = h.get("videos") or {}
                 pick = next((vids[k] for k in ("large", "medium") if (vids.get(k) or {}).get("url") and (vids[k].get("height") or 0) >= 1080), None)
@@ -503,7 +531,7 @@ def pixabay_clips(scenes, tmp, seed="x"):
             if not cands:
                 print("pixabay: nothing for", q)
                 continue
-            vid, link = rng.choice(cands[:5])
+            vid, link = rng.choice(cands[:6])
             used.add(vid)
             path = os.path.join(tmp, f"stock_{i}.mp4")
             rr = requests.get(link, timeout=180)
@@ -511,6 +539,7 @@ def pixabay_clips(scenes, tmp, seed="x"):
             with open(path, "wb") as fh:
                 fh.write(rr.content)
             out[i] = path
+            mark_used("pixabay:%s" % vid)
             print("pixabay ok", i, q, vid)
         except Exception as e:  # noqa: BLE001
             print("pixabay failed", i, q, str(e)[:200])
@@ -1787,6 +1816,8 @@ def carry_over(base_out, jid):
 def write_showcase(base_out, items):
     with open(os.path.join(base_out, "manifest.json"), "w") as fh:
         json.dump({"items": items}, fh, ensure_ascii=False)
+    with open(os.path.join(base_out, "used_media.json"), "w") as fh:
+        json.dump({"ids": used_media()[-3000:]}, fh)
     esc = lambda t: (str(t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
     cards = []
     for it in sorted(items, key=lambda x: -float(x.get("ts", 0))):
