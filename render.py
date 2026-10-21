@@ -1738,6 +1738,246 @@ def reel_story(job, base, brand, out_dir):
     img.convert("RGB").save(p, "JPEG", quality=90, optimize=True)
     return p
 
+# ---------------------------------------------------------------- кинематографичный монтаж (montage)
+# Ролик без диктора: ИИ-кадры с медленным движением камеры, дымкой, зерном, музыкой,
+# названием в начале и финальной карточкой «Подписывайтесь».
+
+def _grade_lut():
+    """Тон «кино»: чуть приглушённые цвета, холодные тени, тёплые света, мягкий контраст."""
+    def curve(v, lift, gain):
+        x = v / 255.0
+        x = x * x * (3 - 2 * x) * 0.35 + x * 0.65          # мягкая S-кривая
+        x = lift + x * (gain - lift)
+        return max(0, min(255, int(round(x * 255))))
+    r = [curve(v, 0.03, 1.00) for v in range(256)]
+    g = [curve(v, 0.035, 0.97) for v in range(256)]
+    b = [curve(v, 0.06, 0.93) for v in range(256)]
+    return r + g + b
+
+
+def _vignette(w, h, strength=0.55):
+    small = Image.new("L", (w // 8, h // 8))
+    cx, cy = small.width / 2, small.height / 2
+    md = math.hypot(cx, cy)
+    px = small.load()
+    for y in range(small.height):
+        for x in range(small.width):
+            d = math.hypot(x - cx, (y - cy) * 0.8) / md
+            px[x, y] = int(255 * max(0.0, min(1.0, (d - 0.35) / 0.65)) ** 1.6 * strength)
+    v = small.resize((w, h), Image.BILINEAR)
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    layer.putalpha(v)
+    return layer
+
+
+def _mist(w, h, seed=3):
+    """Полупрозрачная дымка (шире кадра, чтобы её можно было сдвигать)."""
+    rng = random.Random(seed)
+    base = Image.new("L", (w // 16, h // 16))
+    px = base.load()
+    for y in range(base.height):
+        for x in range(base.width):
+            px[x, y] = rng.randint(0, 255)
+    m = base.resize((w * 2, h), Image.BICUBIC).filter(ImageFilter.GaussianBlur(110))
+    m = ImageOps.autocontrast(m)
+    # дымка гуще у низа кадра, как туман над землёй
+    grad = Image.linear_gradient("L").resize((w * 2, h))
+    m = ImageChops.multiply(m, grad.point(lambda v: int(80 + v * 0.69)))
+    m = m.point(lambda v: int(max(0, v - 70) * 0.42))
+    layer = Image.new("RGBA", (w * 2, h), (225, 228, 232, 0))
+    layer.putalpha(m)
+    return layer
+
+
+def _grain_frames(w, h, n=6, seed=5):
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        g = Image.effect_noise((w // 2, h // 2), 28).resize((w, h), Image.NEAREST)
+        a = g.point(lambda v: int(abs(v - 128) * 0.22))
+        layer = Image.new("RGBA", (w, h), (128, 128, 128, 0))
+        layer.putalpha(a)
+        out.append(layer)
+        rng.random()
+    return out
+
+
+def _spaced(d, xy_center_y, text, font, fill, spacing):
+    widths = [d.textlength(ch, font=font) for ch in text]
+    total = sum(widths) + spacing * (len(text) - 1)
+    x = (VW - total) / 2
+    for ch, cw in zip(text, widths):
+        d.text((x, xy_center_y), ch, font=font, fill=fill)
+        x += cw + spacing
+
+
+def _montage_title(title, sub):
+    lay = Image.new("RGBA", (VW, VH), (0, 0, 0, 0))
+    d = ImageDraw.Draw(lay)
+    f = font_title(96)
+    t = title.upper()
+    while d.textlength(t, font=f) + 14 * len(t) > VW - 120 and f.size > 50:
+        f = font_title(f.size - 6)
+    _spaced(d, VH * 0.40, t, f, (245, 236, 214), 14)
+    if sub:
+        sf = font_sans(34, 600)
+        _center_text(d, VH * 0.40 + f.size + 40, sub, sf, GOLD)
+    return lay
+
+
+def _montage_label(text):
+    lay = Image.new("RGBA", (VW, VH), (0, 0, 0, 0))
+    if not text:
+        return lay
+    d = ImageDraw.Draw(lay)
+    f = font_sans(38, 600)
+    w = d.textlength(text, font=f)
+    y = VH - 430
+    d.rectangle(((VW - w) / 2 - 2, y + 58, (VW - w) / 2 + 60, y + 62), fill=GOLD)
+    d.text(((VW - w) / 2, y), text, font=f, fill=(240, 234, 222), stroke_width=2, stroke_fill=(0, 0, 0))
+    return lay
+
+
+def _montage_outro(job):
+    lay = Image.new("RGBA", (VW, VH), INK + (150,))
+    d = ImageDraw.Draw(lay)
+    brand = job.get("brand", "Хроники времени")
+    _story_badge(d, brand, y=VH * 0.33)
+    lines = job.get("outro") or ["Подписывайтесь", "на «Хроники времени»"]
+    size = 84
+    f = font_title(size)
+    while max(d.textlength(ln, font=f) for ln in lines) > VW - 140 and size > 48:
+        size -= 4
+        f = font_title(size)
+    y = VH * 0.40
+    for ln in lines:
+        _center_text(d, y, ln, f, WHITE, 3)
+        y += int(size * 1.25)
+    if job.get("handle"):
+        _center_text(d, y + 30, job["handle"], font_sans(40, 700), GOLD, 2)
+    if job.get("outro_sub"):
+        _center_text(d, y + 100, job["outro_sub"], font_sans(32, 500), (225, 218, 205), 2)
+    return lay
+
+
+def render_montage(job, out_dir):
+    scenes = job["scenes"][:14]
+    tmp = tempfile.mkdtemp()
+    per = float(job.get("scene_sec") or 2.8)
+    outro_sec = float(job.get("outro_sec") or 3.6)
+    xf = 0.45                                   # длина перекрёстного перехода
+    n_sc = len(scenes)
+    total = n_sc * per + outro_sec
+    n = int(total * FPS)
+    lut = _grade_lut()
+    vig = _vignette(VW, VH)
+    mist = _mist(VW, VH, seed=len(scenes))
+    grains = _grain_frames(VW, VH)
+    Z = 1.14
+    bigs, labels = [], []
+    for i, s in enumerate(scenes):
+        img = load_image(s["image_url"])
+        big = cover(img, int(VW * Z), int(VH * Z)).convert("RGB").point(lut)
+        bigs.append(big)
+        labels.append(_montage_label(s.get("label") or ""))
+    title_lay = _montage_title(job.get("title") or "", job.get("subtitle") or "")
+    outro_lay = _montage_outro(job)
+    rng = random.Random(str(job.get("id")))
+    moves = []
+    for i in range(n_sc):
+        zin = i % 2 == 0
+        dx, dy = rng.uniform(-0.5, 0.5), rng.uniform(-0.4, 0.4)
+        moves.append((zin, dx, dy))
+
+    def scene_frame(i, t):
+        """t от 0 до 1 внутри сцены (с запасом на переход)."""
+        big = bigs[i]
+        zin, dx, dy = moves[i]
+        k = max(0.0, min(1.0, t))
+        e = k * k * (3 - 2 * k)
+        s = 1.0 + (Z - 1.0) * (e if zin else 1 - e)
+        cw, ch = big.width / s, big.height / s
+        mx, my = (big.width - cw) / 2, (big.height - ch) / 2
+        l = mx + mx * dx * (e - 0.5) * 1.6
+        tp = my + my * dy * (e - 0.5) * 1.6
+        l = max(0, min(big.width - cw, l))
+        tp = max(0, min(big.height - ch, tp))
+        return big.resize((VW, VH), Image.BILINEAR, box=(l, tp, l + cw, tp + ch))
+
+    music = job.get("music_url") or (MUSIC.get(job.get("music") or "kazakh") or MUSIC["steppe"])[0]
+    if music.startswith("http"):
+        mpath = os.path.join(tmp, "music.mp3")
+        r = requests.get(music, timeout=120, headers=BROWSER_UA)
+        r.raise_for_status()
+        with open(mpath, "wb") as fh:
+            fh.write(r.content)
+    else:
+        mpath = music
+    mdur = probe_duration(mpath)
+    off = float(job.get("music_offset") or 0)
+    off = max(0.0, min(off, mdur - total - 0.5)) if mdur > total + 1 else 0.0
+    out = os.path.join(out_dir, "reel.mp4")
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{VW}x{VH}", "-r", str(FPS), "-i", "-",
+           "-ss", f"{off:.2f}", "-t", f"{total:.2f}", "-i", mpath,
+           "-filter_complex", f"[1:a]afade=t=in:st=0:d=0.6,afade=t=out:st={total - 2.2:.2f}:d=2.2,loudnorm=I=-14:TP=-1.2:LRA=11,aresample=44100[a]",
+           "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-profile:v", "high", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", out]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    cover_frame = None
+    for fi in range(n):
+        tt = fi / FPS
+        if tt < n_sc * per:
+            i = min(n_sc - 1, int(tt // per))
+            local = (tt - i * per) / per
+            fr = scene_frame(i, local * 0.92 + 0.04)
+            if i + 1 < n_sc and tt > (i + 1) * per - xf:
+                a = (tt - ((i + 1) * per - xf)) / xf
+                fr = Image.blend(fr, scene_frame(i + 1, 0.04 * a), a * a * (3 - 2 * a))
+            fr = fr.convert("RGBA")
+            # дымка плывёт медленно
+            sh = int((tt * 26) % VW)
+            fr.alpha_composite(mist.crop((sh, 0, sh + VW, VH)))
+            la = labels[i]
+            if local > 0.12 and local < 0.9 and (job.get("labels", True)):
+                aa = min(1.0, (local - 0.12) / 0.15, (0.9 - local) / 0.15)
+                if aa > 0:
+                    tmpl = la.copy()
+                    tmpl.putalpha(la.getchannel("A").point(lambda v: int(v * aa)))
+                    fr.alpha_composite(tmpl)
+            if tt < 2.6 and job.get("title"):
+                ta = min(1.0, tt / 0.5, (2.6 - tt) / 0.5)
+                tl = title_lay.copy()
+                tl.putalpha(title_lay.getchannel("A").point(lambda v: int(v * ta)))
+                fr.alpha_composite(Image.new("RGBA", (VW, VH), INK + (int(70 * ta),)))
+                fr.alpha_composite(tl)
+            if fi == int(FPS * 1.4):
+                cover_frame = fr.copy()
+        else:
+            to = (tt - n_sc * per) / outro_sec
+            fr = scene_frame(n_sc - 1, 0.96 + 0.04 * to).convert("RGBA")
+            sh = int((tt * 26) % VW)
+            fr.alpha_composite(mist.crop((sh, 0, sh + VW, VH)))
+            oa = min(1.0, to / 0.18)
+            ol = outro_lay.copy()
+            ol.putalpha(outro_lay.getchannel("A").point(lambda v: int(v * oa)))
+            fr.alpha_composite(ol)
+        fr.alpha_composite(vig)
+        fr.alpha_composite(grains[fi % len(grains)])
+        proc.stdin.write(fr.convert("RGB").tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise RuntimeError("ffmpeg montage failed")
+    files = [out]
+    try:
+        cimg = (cover_frame or scene_frame(0, 0.2).convert("RGBA")).convert("RGB")
+        p = os.path.join(out_dir, "cover.jpg")
+        cimg.save(p, "JPEG", quality=90, optimize=True)
+        files.append(p)
+    except Exception as e:  # noqa: BLE001
+        print("montage cover skipped:", e)
+    return files
+
+
 # ---------------------------------------------------------------- main
 
 def callback(job, payload):
@@ -1822,12 +2062,12 @@ def write_showcase(base_out, items):
     cards = []
     for it in sorted(items, key=lambda x: -float(x.get("ts", 0))):
         when = time.strftime("%d.%m %H:%M", time.gmtime(float(it.get("ts", 0)) + 5 * 3600))
-        kind = {"reel": "Reels", "voices": "Пробник голосов", "story": "История"}.get(it.get("type"), "Карусель")
+        kind = {"reel": "Reels", "montage": "Reels", "voices": "Пробник голосов", "story": "История"}.get(it.get("type"), "Карусель")
         if it.get("type") == "voices":
             media = "".join('<div style="margin:8px 0"><b>%s</b><br><audio controls preload="none" src="%s/%s"></audio></div>' % (esc(f[3:-4].replace("_", " ")), it["id"], f) for f in it.get("files", []))
             cards.append('<section><h2>%s · %s</h2><p>%s</p>%s</section>' % (kind, when, esc(it.get("title")), media))
             continue
-        if it.get("type") == "reel":
+        if it.get("type") in ("reel", "montage"):
             media = "".join(('<video controls preload="metadata" src="%s/%s"></video>' if f.endswith(".mp4") else '<img loading="lazy" style="height:480px" src="%s/%s">') % (it["id"], f) for f in it.get("files", []))
         else:
             media = "".join('<a href="%s/%s"><img loading="lazy" src="%s/%s"></a>' % (it["id"], f, it["id"], f) for f in it.get("files", []))
@@ -1918,7 +2158,7 @@ def main():
                            "error": "files not reachable on Pages: " + ", ".join(missing)[:400]})
             sys.exit(1)
         payload = {"id": job.get("id"), "type": job.get("type"), "status": "ok"}
-        if job["type"] == "reel":
+        if job["type"] in ("reel", "montage"):
             payload["video_url"] = urls[0]
             covers = [u for u in urls[1:] if u.endswith("cover.jpg")] or [u for u in urls[1:] if u.endswith(".jpg") and not u.endswith("story.jpg")]
             if covers:
@@ -1951,6 +2191,8 @@ def main():
         files = render_voices(job, out_dir)
     elif job["type"] == "story":
         files = render_story(job, out_dir)
+    elif job["type"] == "montage":
+        files = render_montage(job, out_dir)
     else:
         raise ValueError("unknown type " + str(job.get("type")))
     with open(os.path.join(out_dir, "result.json"), "w") as fh:
