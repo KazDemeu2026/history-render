@@ -1361,6 +1361,17 @@ def render_reel(job, out_dir):
             print("tts: fal failed, fallback to audio_url:", str(e)[:300])
     if not audio:
         audio = download(job["audio_url"], os.path.join(tmp, "voice.mp3"))
+        # 27.10: диктор чуть быстрее (по умолчанию +5%), без смены высоты голоса.
+        tempo = float(job.get("voice_tempo") or os.environ.get("VOICE_TEMPO") or 1.05)
+        if abs(tempo - 1.0) > 0.005:
+            fast = os.path.join(tmp, "voice_fast.mp3")
+            try:
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", audio, "-filter:a", f"atempo={tempo:.3f}",
+                                "-c:a", "libmp3lame", "-q:a", "2", fast], check=True)
+                audio = fast
+                print("voice tempo", tempo)
+            except Exception as e:  # noqa: BLE001
+                print("voice tempo skipped:", e)
     dur = probe_duration(audio) + 0.6
     weights = [max(12, len(s.get("caption", ""))) for s in scenes]
     total_w = sum(weights)
