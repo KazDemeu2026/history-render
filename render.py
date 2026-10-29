@@ -1183,13 +1183,27 @@ class MapScene:
             x0, y0 = ccx - ax / sc, ccy - ay / sc
             return (x0, y0, x0 + VW / sc, y0 + VH / sc)
         self.b1, self.b2 = box(1.15), box(1.0)
-        X0, Y0 = int(math.floor(self.b1[0])), int(math.floor(self.b1[1]))
-        X1, Y1 = int(math.ceil(self.b1[2])) + 1, int(math.ceil(self.b1[3])) + 1
+        # 30.10: камера следует за походом — наезжает на исходную точку, идёт за остриём стрелки
+        # и в конце отъезжает, показывая весь путь («откуда и куда»).
+        self.follow = bool(self.arrows) or self.route
+        self.ZOOM = 1.5
+        self.scale, self.anchor = scale, (ax, ay)
+        for a in self.arrows:
+            path = []
+            for i in range(len(a["wxy"]) - 1):
+                path += self._bez(a["wxy"][i], a["wxy"][i + 1])[(1 if i else 0):]
+            a["path"] = path
+        self._cb = None
+        heads = [p for a in self.arrows for p in a["path"]] + (allxy[:len(self.pts)] if self.route else [])
+        bb = [self.b1, self.b2] + [self.zbox(h) for h in heads]
+        X0, Y0 = int(math.floor(min(q[0] for q in bb))), int(math.floor(min(q[1] for q in bb)))
+        X1, Y1 = int(math.ceil(max(q[2] for q in bb))) + 1, int(math.ceil(max(q[3] for q in bb))) + 1
+        R = 1.5 if self.follow else 1.0  # запас разрешения под наезд камеры
         self.f = 1.0
         self.land = None  # маска суши: заливки держав не заходят в моря
         if D:
             # векторная карта рисуется сразу в разрешении кадра
-            sw, sh = int(round((X1 - X0) * scale)), int(round((Y1 - Y0) * scale))
+            sw, sh = int(round((X1 - X0) * scale * R)), int(round((Y1 - Y0) * scale * R))
             lon0, lon1 = X0 / Wd * 360 - 180, X1 / Wd * 360 - 180
             lat0, lat1 = 90 - Y0 / Ht * 180, 90 - Y1 / Ht * 180
             sub, self.land = vector_base(lon0, lat0, lon1, lat1, sw, sh, style)
@@ -1203,7 +1217,7 @@ class MapScene:
                     if fx0 < 30 or fx1 > VW - 30 or fy0 < 390 or fy1 > VH * 0.64:
                         return False
                 return True
-            water_labels(ImageDraw.Draw(sub, "RGBA"), lon0, lat0, lon1, lat1, sw, sh, style, font_italic, inside)
+            water_labels(ImageDraw.Draw(sub, "RGBA"), lon0, lat0, lon1, lat1, sw, sh, style, lambda z: font_italic(int(z * R)), inside)
             ix0 = ix1 = 0
         else:
             sub = Image.new("RGB", (X1 - X0, Y1 - Y0), (34, 27, 20))
@@ -1241,6 +1255,40 @@ class MapScene:
         self.sf = font_sans(26, 600)
         self.yf = font_title(88)
 
+    def zbox(self, h):
+        """Окно камеры при наезде: точка h (мировые координаты) попадает в якорь кадра."""
+        sc = self.scale * self.ZOOM
+        x0, y0 = h[0] - self.anchor[0] / sc, h[1] - self.anchor[1] / sc
+        return (x0, y0, x0 + VW / sc, y0 + VH / sc)
+
+    @staticmethod
+    def _ramp(x):
+        x = min(1.0, max(0.0, x))
+        return x * x * (3 - 2 * x)
+
+    def _follow_target(self, t):
+        """Куда смотрит камера в момент t: (точка в мировых координатах, вес 0..1)."""
+        if self.arrows:
+            a0, aend = self.t_arrow[0][0], self.t_arrow[-1][1]
+            w = self._ramp((t - a0) / 0.07) * (1 - self._ramp((t - aend) / 0.12))
+            i = max([k for k in range(len(self.arrows)) if self.t_arrow[k][0] <= t] or [0])
+            s0, s1 = self.t_arrow[i]
+            prog = min(1.0, max(0.0, (t - s0) / max(0.05, s1 - s0)))
+            path = self.arrows[i]["path"]
+            return path[min(len(path) - 1, int(len(path) * prog))], w
+        # маршрут по городам
+        w = self._ramp((t - 0.08) / 0.07) * (1 - self._ramp((t - 0.78) / 0.12))
+        prog = min(1.0, max(0.0, (t - 0.08) / 0.7))
+        tip = self.xy[0]
+        for i in range(len(self.xy) - 1):
+            if prog >= self.at[i + 1]:
+                tip = self.xy[i + 1]
+            else:
+                k = (prog - self.at[i]) / max(1e-6, self.at[i + 1] - self.at[i])
+                tip = (self.xy[i][0] + (self.xy[i + 1][0] - self.xy[i][0]) * k, self.xy[i][1] + (self.xy[i + 1][1] - self.xy[i][1]) * k)
+                break
+        return tip, w
+
     @staticmethod
     def _bez(p0, p1, bend=0.18):
         """Плавная дуга между двумя точками (для стрелок походов)."""
@@ -1272,9 +1320,21 @@ class MapScene:
         t = fi / max(1, self.n - 1)
         e = t * t * (3 - 2 * t)
         b = [self.b1[i] + (self.b2[i] - self.b1[i]) * e for i in range(4)]
+        if self.follow:
+            head, w = self._follow_target(t)
+            if w > 0:
+                tb = self.zbox(head)
+                b = [b[i] * (1 - w) + tb[i] * w for i in range(4)]
+            # сглаживание движения камеры между кадрами (кадры идут по порядку)
+            if self._cb is None or fi == 0:
+                self._cb = list(b)
+            else:
+                self._cb = [self._cb[i] + (b[i] - self._cb[i]) * 0.1 for i in range(4)]
+            b = self._cb
         ox, oy = self.off
         f = self.f
         cam = safe_box(self.sub, (b[0] - ox) * f, (b[1] - oy) * f, (b[2] - ox) * f, (b[3] - oy) * f)
+        b = [cam[0] / f + ox, cam[1] / f + oy, cam[2] / f + ox, cam[3] / f + oy]  # геометрия строго по окну картинки
         img = self.sub.resize((VW, VH), Image.BICUBIC, box=cam).convert("RGBA")
         sx, sy = VW / (b[2] - b[0]), VH / (b[3] - b[1])
         S = lambda p: ((p[0] - b[0]) * sx, (p[1] - b[1]) * sy)
