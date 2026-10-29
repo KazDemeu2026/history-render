@@ -377,6 +377,93 @@ WAN_MOTION = ("Animate this historical painting with subtle, realistic cinematic
               "Keep the painting's style, colors and composition. No text, no new objects.")
 
 
+VEO_MOTION = ("Cinematic slow camera push-in, subtle natural motion: wind in clothes, banners and grass, drifting dust and mist, "
+              "people and horses moving naturally. Keep the painting's style, colors and composition. No text, no subtitles, no new objects.")
+
+
+def _gcp_token():
+    """Токен доступа к Vertex AI по ключу служебного аккаунта из секрета GCP_SA_KEY."""
+    raw = os.environ.get("GCP_SA_KEY", "").strip()
+    if not raw:
+        return None, None
+    from google.oauth2 import service_account  # noqa: WPS433
+    import google.auth.transport.requests as gtr  # noqa: WPS433
+    info = json.loads(raw)
+    creds = service_account.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds.refresh(gtr.Request())
+    return creds.token, info.get("project_id")
+
+
+def veo_clips(scenes, tmp, count=None):
+    """Оживление первой сцены (или нескольких) моделью Google Veo на Vertex AI.
+    Картина сцены — первый кадр. Возвращает {индекс сцены: путь к mp4}; любая ошибка — сцена останется картиной."""
+    try:
+        token, project = _gcp_token()
+    except Exception as e:  # noqa: BLE001
+        print("veo: auth failed", str(e)[:200])
+        return {}
+    if not token:
+        print("veo: skipped (no GCP_SA_KEY)")
+        return {}
+    loc = os.environ.get("VEO_LOCATION", "us-central1")
+    model = os.environ.get("VEO_MODEL", "veo-3.1-lite-generate-001")
+    count = int(count or os.environ.get("VEO_SCENES", "1") or 1)
+    dur = int(os.environ.get("VEO_SECONDS", "6") or 6)
+    base = f"https://{loc}-aiplatform.googleapis.com/v1/projects/{project}/locations/{loc}/publishers/google/models/{model}"
+    hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    todo = [(i, s) for i, s in enumerate(scenes) if s.get("image_url") and not s.get("map")][:count]
+    ops = {}
+    for i, s in todo:
+        try:
+            img = cover(load_image(s["image_url"]), 720, 1280)
+            buf = io.BytesIO()
+            img.save(buf, "JPEG", quality=90)
+            prompt = (str(s.get("video_prompt") or s.get("caption") or "") + " " + VEO_MOTION).strip()[:1800]
+            params = {"aspectRatio": "9:16", "durationSeconds": dur, "sampleCount": 1, "resolution": "720p",
+                      "personGeneration": "allow_adult", "generateAudio": False}
+            body = {"instances": [{"prompt": prompt, "image": {"bytesBase64Encoded": base64.b64encode(buf.getvalue()).decode(), "mimeType": "image/jpeg"}}],
+                    "parameters": params}
+            r = requests.post(base + ":predictLongRunning", json=body, headers=hdr, timeout=60)
+            if r.status_code >= 300 and "generateAudio" in r.text:
+                params.pop("generateAudio", None)
+                r = requests.post(base + ":predictLongRunning", json=body, headers=hdr, timeout=60)
+            j = r.json()
+            if not j.get("name"):
+                print("veo submit failed", i, r.status_code, str(j)[:400])
+                continue
+            ops[i] = j["name"]
+            print("veo submitted", i, model, j["name"][-24:])
+        except Exception as e:  # noqa: BLE001
+            print("veo submit error", i, str(e)[:200])
+    out, t0 = {}, time.time()
+    while ops and time.time() - t0 < 540:
+        time.sleep(12)
+        for i in list(ops):
+            try:
+                r = requests.post(base + ":fetchPredictOperation", json={"operationName": ops[i]}, headers=hdr, timeout=120)
+                j = r.json()
+                if not j.get("done"):
+                    continue
+                del ops[i]
+                if j.get("error"):
+                    print("veo failed", i, str(j["error"])[:300])
+                    continue
+                vids = (j.get("response") or {}).get("videos") or []
+                if not vids or not vids[0].get("bytesBase64Encoded"):
+                    print("veo: no video", i, str(j.get("response"))[:300])
+                    continue
+                path = os.path.join(tmp, f"veo_{i}.mp4")
+                with open(path, "wb") as fh:
+                    fh.write(base64.b64decode(vids[0]["bytesBase64Encoded"]))
+                out[i] = path
+                print("veo ready", i, round(time.time() - t0), "s")
+            except Exception as e:  # noqa: BLE001
+                print("veo poll error", i, str(e)[:160])
+    for i in ops:
+        print("veo timeout", i)
+    return out
+
+
 def wan_clips(scenes, tmp):
     """Оживление картины первой сцены (или нескольких) моделью Wan 2.2 (Alibaba Cloud Model Studio, Сингапур).
     Картина сцены — первый кадр. Возвращает {индекс сцены: путь к mp4}; любая ошибка — сцена останется картиной."""
@@ -1426,7 +1513,7 @@ def render_reel(job, out_dir):
     for s in scenes:
         img = load_image(s["image_url"])
         bases.append(cover(img, int(VW * 1.18), int(VH * 1.18)))
-    clips = wan_clips(scenes, tmp)  # оживлённая картина в начале ролика
+    clips = veo_clips(scenes, tmp) or wan_clips(scenes, tmp)  # оживлённая картина в начале ролика (Veo, запасной Wan)
     ai = fal_clips(scenes, tmp) if not clips else {}
     for k, v in ai.items():
         clips.setdefault(k, v)
