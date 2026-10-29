@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
-          pip install -q pillow requests numpy
+          pip install -q pillow requests numpy google-auth
           mkdir -p fonts
           curl -fsSL -o fonts/Montserrat.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf" || true
           curl -fsSL -o fonts/Playfair.ttf "https://github.com/google/fonts/raw/main/ofl/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf" || true
@@ -56,6 +56,7 @@ jobs:
           PEXELS_KEY: ${{ secrets.PEXELS_KEY }}
           PIXABAY_KEY: ${{ secrets.PIXABAY_KEY }}
           DASHSCOPE_KEY: ${{ secrets.DASHSCOPE_KEY }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: python render.py --render
 
       - uses: actions/configure-pages@v5
