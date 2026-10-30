@@ -708,6 +708,33 @@ def word_starts(stamps):
     return out
 
 
+def google_tts(text, v, path):
+    """Озвучка голосами Google Cloud Text-to-Speech (родные русские дикторы).
+    v = {"model": "google:<voice-name>", "body": {...}} — оплата из кредитов Google Cloud."""
+    token, project = _gcp_token()
+    if not token:
+        raise RuntimeError("no GCP_SA_KEY")
+    name = str(v.get("model", "")).split(":", 1)[-1] or "ru-RU-Chirp3-HD-Charon"
+    body = dict(v.get("body") or {})
+    audio = {"audioEncoding": "MP3", "speakingRate": body.pop("speakingRate", 1.05)}
+    if "pitch" in body:
+        audio["pitch"] = body.pop("pitch")
+    req = {"input": {"text": text}, "voice": {"languageCode": "ru-RU", "name": name}, "audioConfig": audio}
+    if body.get("prompt"):
+        req["input"] = {"prompt": body["prompt"], "text": text}
+    r = requests.post("https://texttospeech.googleapis.com/v1/text:synthesize", json=req,
+                      headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
+                               "x-goog-user-project": project or ""}, timeout=180)
+    if r.status_code >= 300:
+        raise RuntimeError(f"gtts {r.status_code} {r.text[:300]}")
+    data = r.json().get("audioContent")
+    if not data:
+        raise RuntimeError("gtts: no audio " + str(r.json())[:200])
+    with open(path, "wb") as fh:
+        fh.write(base64.b64decode(data))
+    return None
+
+
 def render_voices(job, out_dir):
     """Пробник голосов: один и тот же текст разными голосами, чтобы выбрать на слух."""
     files = []
@@ -718,6 +745,8 @@ def render_voices(job, out_dir):
             if v.get("file"):
                 with open(os.path.join(HERE, v["file"]), "rb") as src, open(path, "wb") as dst:
                     dst.write(src.read())
+            elif str(v.get("model", "")).startswith("google:"):
+                google_tts(job["text"], v, path)
             else:
                 fal_tts(job["text"], v, path)
             files.append(path)
