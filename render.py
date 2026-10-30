@@ -1535,6 +1535,18 @@ def render_reel(job, out_dir):
             print("tts: fal ok, words with time:", len(starts))
         except Exception as e:  # noqa: BLE001
             print("tts: fal failed, fallback to audio_url:", str(e)[:300])
+    if not audio and job.get("gtts"):
+        # 30.10: diktor - rodnoy russkiy golos Google Cloud TTS.
+        g = job["gtts"] if isinstance(job["gtts"], dict) else {}
+        try:
+            p = os.path.join(tmp, "voice_g.mp3")
+            google_tts(" ".join(s.get("caption", "") for s in scenes),
+                       {"model": "google:" + str(g.get("voice") or "ru-RU-Wavenet-D"),
+                        "body": {"speakingRate": float(g.get("rate") or 1.05)}}, p)
+            audio = p
+            print("tts: google ok", g.get("voice"))
+        except Exception as e:  # noqa: BLE001
+            print("tts: google failed, fallback to audio_url:", str(e)[:300])
     if not audio:
         audio = download(job["audio_url"], os.path.join(tmp, "voice.mp3"))
         # 27.10: диктор чуть быстрее (по умолчанию +5%), без смены высоты голоса.
