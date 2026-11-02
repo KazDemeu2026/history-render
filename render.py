@@ -1623,6 +1623,7 @@ def render_reel(job, out_dir):
         for k, v in stock.items():
             clips.setdefault(k, v)
 
+    audio = mix_music(audio, job, tmp)  # 02.11: народная музыка фоном под диктором
     out = os.path.join(out_dir, "reel.mp4")
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
@@ -1833,8 +1834,95 @@ MUSIC = {
     "steppe": ["https://cdn.pixabay.com/audio/2026/02/18/audio_0a13adcc1f.mp3",   # Nomads
                "https://cdn.pixabay.com/audio/2023/04/14/audio_fd79f974b4.mp3",   # Steppe
                "https://cdn.pixabay.com/audio/2026/07/05/audio_469bd6ddf4.mp3"],
-    "mongol": ["https://cdn.pixabay.com/audio/2026/07/08/audio_14e3737a27.mp3"],  # Atlas • Mongolia
+    "mongol": ["https://cdn.pixabay.com/audio/2026/07/08/audio_14e3737a27.mp3"],  # Atlas - Mongolia
+    "korean": ["https://cdn.pixabay.com/audio/2026/07/02/audio_8bd6596907.mp3"],
+    "chinese": ["https://cdn.pixabay.com/audio/2026/07/14/audio_4fcb3bef30.mp3"],
+    "uyghur": ["https://cdn.pixabay.com/audio/2026/07/14/audio_9f4d78dcb7.mp3"],
+    "german": ["https://cdn.pixabay.com/audio/2026/08/11/audio_28fbf2b088.mp3",
+               "https://cdn.pixabay.com/audio/2025/02/16/audio_1278d007a3.mp3"],
+    "tatar": ["https://cdn.pixabay.com/audio/2025/07/16/audio_f8758546de.mp3"],
+    "russian": ["https://cdn.pixabay.com/audio/2022/03/31/audio_340432a082.mp3"],
+    "ukrainian": ["https://cdn.pixabay.com/audio/2026/06/27/audio_a97dea6587.mp3"],
+    "caucasus": ["https://cdn.pixabay.com/audio/2025/08/30/audio_b47d91a5a4.mp3"],
+    "turkish": ["https://cdn.pixabay.com/audio/2026/08/29/audio_50812edd0a.mp3"],
+    "kurdish": ["https://cdn.pixabay.com/audio/2025/09/05/audio_abc437ccb1.mp3"],
+    "greek": ["https://cdn.pixabay.com/audio/2026/06/27/audio_d598f8d41c.mp3"],
+    "polish": ["https://cdn.pixabay.com/audio/2025/07/02/audio_ec36f5c289.mp3"],
 }
+
+MUSIC_WORDS = [
+    ("korean", ("корейц", "кореец", "корея", "корейск")),
+    ("chinese", ("дунган",)),
+    ("uyghur", ("уйгур",)),
+    ("german", ("немц", "немец", "немецк", "поволж")),
+    ("tatar", ("татар",)),
+    ("ukrainian", ("украин",)),
+    ("caucasus", ("чечен", "ингуш", "кавказ", "вайнах", "балкар")),
+    ("turkish", ("турки", "турок", "месхет", "турецк")),
+    ("kurdish", ("курд",)),
+    ("polish", ("поляк", "польск")),
+    ("greek", ("грек", "гречес")),
+    ("uzbek", ("узбек",)),
+    ("kyrgyz", ("кыргыз", "киргиз")),
+    ("mongol", ("монгол", "чингис", "орда", "ордын", "батый", "тохтамыш", "джучи", "каракорум", "хан")),
+    ("russian", ("русски", "русск", "россия", "славян")),
+    ("kazakh", ("казах", "казак", "жетысу", "алаш", "степ")),
+]
+
+
+def guess_music(job):
+    """Народная музыка по теме ролика: из job.music, иначе по названию, серии и подписям."""
+    if "music" in job and job["music"] is False:
+        return None
+    if job.get("music"):
+        return str(job["music"])
+    parts = [str(job.get("title") or ""), str(job.get("series_label") or "")]
+    parts += [str(s.get("caption", "")) for s in (job.get("scenes") or [])]
+    text = " ".join(parts).lower()
+    for name, words in MUSIC_WORDS:
+        if any(w in text for w in words):
+            return name
+    return "steppe"
+
+
+def music_bed(key, seed, tmp):
+    urls = MUSIC.get(key) or MUSIC["steppe"]
+    url = urls[sum(map(ord, str(seed))) % len(urls)]
+    path = os.path.join(tmp, "bed.mp3")
+    r = requests.get(url, timeout=120, headers=BROWSER_UA)
+    r.raise_for_status()
+    with open(path, "wb") as fh:
+        fh.write(r.content)
+    return path, url
+
+
+def mix_music(voice, job, tmp):
+    """Тихая народная музыка под диктором: пока звучит голос, музыка приглушается."""
+    key = guess_music(job)
+    if not key:
+        return voice
+    try:
+        bed, url = music_bed(key, job.get("id", "x"), tmp)
+        dur = probe_duration(voice)
+        if not dur or dur < 2:
+            return voice
+        gain = float(job.get("music_gain") or os.environ.get("MUSIC_GAIN") or 0.18)
+        fade = max(0.6, min(2.5, dur - 0.6))
+        out = os.path.join(tmp, "voice_mix.mp3")
+        flt = ("[0:a]asplit=2[v][sc0];[sc0]apad[sc];"
+               f"[1:a]volume={gain:.3f},afade=t=in:st=0:d=1.2,"
+               f"afade=t=out:st={max(0.0, dur - fade):.2f}:d={fade:.2f},aresample=44100[m];"
+               "[m][sc]sidechaincompress=threshold=0.035:ratio=9:attack=8:release=340[md];"
+               "[v][md]amix=inputs=2:duration=first:normalize=0[a]")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", voice,
+                        "-stream_loop", "-1", "-i", bed,
+                        "-filter_complex", flt, "-map", "[a]", "-t", f"{dur:.2f}",
+                        "-c:a", "libmp3lame", "-q:a", "2", out], check=True)
+        print("music:", key, url.rsplit("/", 1)[-1], "gain", gain)
+        return out
+    except Exception as e:  # noqa: BLE001
+        print("music skipped:", str(e)[:200])
+        return voice
 STORY_SEC = 12
 
 
