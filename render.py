@@ -1535,9 +1535,9 @@ def render_reel(job, out_dir):
             print("tts: fal ok, words with time:", len(starts))
         except Exception as e:  # noqa: BLE001
             print("tts: fal failed, fallback to audio_url:", str(e)[:300])
-    if not audio and job.get("gtts"):
-        # 30.10: diktor - rodnoy russkiy golos Google Cloud TTS.
-        g = job["gtts"] if isinstance(job["gtts"], dict) else {}
+    if not audio and job.get("gtts") is not False:
+        # 02.11: diktor po umolchaniyu - golos Google Cloud TTS ru-RU-Wavenet-D.
+        g = job["gtts"] if isinstance(job.get("gtts"), dict) else {}
         try:
             p = os.path.join(tmp, "voice_g.mp3")
             google_tts(" ".join(s.get("caption", "") for s in scenes),
