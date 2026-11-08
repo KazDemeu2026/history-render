@@ -407,7 +407,7 @@ def veo_clips(scenes, tmp, count=None):
         return {}
     loc = os.environ.get("VEO_LOCATION", "us-central1")
     model = os.environ.get("VEO_MODEL", "veo-3.1-lite-generate-001")
-    count = int(count or os.environ.get("VEO_SCENES", "1") or 1)
+    count = int(count or os.environ.get("VEO_SCENES", "2") or 2)
     dur = int(os.environ.get("VEO_SECONDS", "6") or 6)
     base = f"https://{loc}-aiplatform.googleapis.com/v1/projects/{project}/locations/{loc}/publishers/google/models/{model}"
     hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
@@ -1618,7 +1618,8 @@ def render_reel(job, out_dir):
     ai = fal_clips(scenes, tmp) if not clips else {}
     for k, v in ai.items():
         clips.setdefault(k, v)
-    if len(clips) < 2:
+    # 09.11: stokovoe video otklyucheno - v rolik idut tolko istoricheskie kartiny scen i ih ozhivlenie.
+    if os.environ.get("STOCK_CLIPS") == "1" and len(clips) < 2:
         stock = pexels_clips(scenes, tmp, job.get("id", "x")) or pixabay_clips(scenes, tmp, job.get("id", "x"))
         for k, v in stock.items():
             clips.setdefault(k, v)
