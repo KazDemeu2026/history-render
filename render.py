@@ -411,18 +411,20 @@ def veo_clips(scenes, tmp, count=None):
     dur = int(os.environ.get("VEO_SECONDS", "6") or 6)
     base = f"https://{loc}-aiplatform.googleapis.com/v1/projects/{project}/locations/{loc}/publishers/google/models/{model}"
     hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
-    todo = [(i, s) for i, s in enumerate(scenes) if s.get("image_url") and not s.get("map")][:count]
+    todo = [(i, s) for i, s in enumerate(scenes) if (s.get("image_url") or s.get("video_prompt")) and not s.get("map")][:count]
     ops = {}
     for i, s in todo:
         try:
-            img = cover(load_image(s["image_url"]), 720, 1280)
-            buf = io.BytesIO()
-            img.save(buf, "JPEG", quality=90)
             prompt = (str(s.get("video_prompt") or s.get("caption") or "") + " " + VEO_MOTION).strip()[:1800]
             params = {"aspectRatio": "9:16", "durationSeconds": dur, "sampleCount": 1, "resolution": "720p",
                       "personGeneration": "allow_adult", "generateAudio": False}
-            body = {"instances": [{"prompt": prompt, "image": {"bytesBase64Encoded": base64.b64encode(buf.getvalue()).decode(), "mimeType": "image/jpeg"}}],
-                    "parameters": params}
+            inst = {"prompt": prompt}
+            if s.get("image_url"):
+                img = cover(load_image(s["image_url"]), 720, 1280)
+                buf = io.BytesIO()
+                img.save(buf, "JPEG", quality=90)
+                inst["image"] = {"bytesBase64Encoded": base64.b64encode(buf.getvalue()).decode(), "mimeType": "image/jpeg"}
+            body = {"instances": [inst], "parameters": params}
             r = requests.post(base + ":predictLongRunning", json=body, headers=hdr, timeout=60)
             if r.status_code >= 300 and "generateAudio" in r.text:
                 params.pop("generateAudio", None)
@@ -1610,11 +1612,26 @@ def render_reel(job, out_dir):
         od.text((x0 + 26, y0 + 10), label, font=lf, fill=WHITE)
 
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    pre = {}
+    if job.get("veo_all"):
+        # 09.11: film - kazhduyu scenu generiruet Veo po tekstu, chuzhih kartinok i stoka net voobshe.
+        pre = veo_clips(scenes, tmp, count=len(scenes))
+        for i, pth in pre.items():
+            if not scenes[i].get("image_url"):
+                fr = os.path.join(tmp, "firstframe_%d.jpg" % i)
+                try:
+                    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", pth, "-vframes", "1", fr], check=True)
+                    scenes[i]["image_url"] = fr
+                except Exception as e:  # noqa: BLE001
+                    print("first frame failed", i, e)
+        missing = [i for i, s in enumerate(scenes) if not s.get("image_url")]
+        if missing:
+            raise RuntimeError("veo_all: net videoryada dlya scen " + str(missing))
     bases = []
     for s in scenes:
         img = load_image(s["image_url"])
         bases.append(cover(img, int(VW * 1.18), int(VH * 1.18)))
-    clips = veo_clips(scenes, tmp) or wan_clips(scenes, tmp)  # оживлённая картина в начале ролика (Veo, запасной Wan)
+    clips = pre or veo_clips(scenes, tmp) or wan_clips(scenes, tmp)  # оживлённая картина в начале ролика (Veo, запасной Wan)
     ai = fal_clips(scenes, tmp) if not clips else {}
     for k, v in ai.items():
         clips.setdefault(k, v)
