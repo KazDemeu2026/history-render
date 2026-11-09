@@ -438,7 +438,7 @@ def veo_clips(scenes, tmp, count=None):
         except Exception as e:  # noqa: BLE001
             print("veo submit error", i, str(e)[:200])
     out, t0 = {}, time.time()
-    while ops and time.time() - t0 < 540:
+    while ops and time.time() - t0 < int(os.environ.get("VEO_WAIT", "780") or 780):
         time.sleep(12)
         for i in list(ops):
             try:
@@ -1624,6 +1624,18 @@ def render_reel(job, out_dir):
                     scenes[i]["image_url"] = fr
                 except Exception as e:  # noqa: BLE001
                     print("first frame failed", i, e)
+        have = sorted(pre)
+        for i, s in enumerate(scenes):
+            if s.get("image_url") or not have:
+                continue
+            near = min(have, key=lambda k: abs(k - i))
+            fr = os.path.join(tmp, "firstframe_n%d.jpg" % i)
+            try:
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", pre[near], "-vframes", "1", fr], check=True)
+                s["image_url"] = fr
+                print("veo_all: scene", i, "takes frame from", near)
+            except Exception as e:  # noqa: BLE001
+                print("fallback frame failed", i, e)
         missing = [i for i, s in enumerate(scenes) if not s.get("image_url")]
         if missing:
             raise RuntimeError("veo_all: net videoryada dlya scen " + str(missing))
