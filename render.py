@@ -1526,7 +1526,7 @@ class MapScene:
 
 
 def render_reel(job, out_dir):
-    scenes = job["scenes"][:12]
+    scenes = job["scenes"][:int(os.environ.get("REEL_SCENES", "22") or 22)]
     tmp = tempfile.mkdtemp()
     audio, starts = None, []
     if job.get("tts") and os.environ.get("FAL_KEY"):
