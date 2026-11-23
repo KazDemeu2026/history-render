@@ -1640,8 +1640,25 @@ def render_reel(job, out_dir):
         if missing:
             raise RuntimeError("veo_all: net videoryada dlya scen " + str(missing))
     bases = []
-    for s in scenes:
-        img = load_image(s["image_url"])
+    for si, s in enumerate(scenes):
+        # 23.11: bitaya kartinka odnoy sceny bolshe ne ronyaet ves rolik.
+        try:
+            img = load_image(s["image_url"])
+        except Exception as e:  # noqa: BLE001
+            print("image failed, scene", si, str(e)[:160])
+            img = None
+        if img is None:
+            if bases:
+                bases.append(bases[-1])
+                continue
+            for t in scenes[si + 1:]:
+                try:
+                    img = load_image(t["image_url"])
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+            if img is None:
+                raise RuntimeError("ni odna kartinka ne zagruzilas")
         bases.append(cover(img, int(VW * 1.18), int(VH * 1.18)))
     clips = pre or veo_clips(scenes, tmp) or wan_clips(scenes, tmp)  # оживлённая картина в начале ролика (Veo, запасной Wan)
     ai = fal_clips(scenes, tmp) if not clips else {}
