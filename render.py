@@ -1539,6 +1539,9 @@ def imagen_image(scene, job, tmp, idx):
     if not token:
         print("imagen: skipped (no GCP_SA_KEY)")
         return None
+    if IMAGEN_OK[1] and not IMAGEN_OK[0]:
+        # В этом запуске Imagen уже отказал по всем моделям — не тратим время на повтор.
+        return None
     loc = os.environ.get("IMAGEN_LOCATION") or os.environ.get("VEO_LOCATION", "us-central1")
     # Какие модели Imagen включены на проекте, заранее не известно: пробуем по очереди
     # и запоминаем ту, что ответила.
