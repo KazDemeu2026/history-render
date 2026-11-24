@@ -1525,7 +1525,7 @@ class MapScene:
         return img
 
 
-IMAGEN_OK = [None]
+IMAGEN_OK = [None, False]
 
 
 def imagen_image(scene, job, tmp, idx):
@@ -1589,6 +1589,20 @@ def imagen_image(scene, job, tmp, idx):
             return Image.open(path).convert("RGB")
         except Exception as e:  # noqa: BLE001
             print("imagen failed", idx, model, str(e)[:200])
+    if not IMAGEN_OK[1]:
+        # Ни одна модель не ответила: один раз выведем, что вообще доступно на проекте.
+        IMAGEN_OK[1] = True
+        try:
+            lr = requests.get("https://%s-aiplatform.googleapis.com/v1/publishers/google/models" % loc,
+                              headers=hdr, timeout=60)
+            lj = lr.json()
+            names = [str(m.get("name", "")).rsplit("/", 1)[-1] for m in (lj.get("publisherModels") or [])]
+            pic = [n for n in names if "imag" in n.lower() or "image" in n.lower()]
+            print("imagen: available models", lr.status_code, "total", len(names), "picture", pic[:25])
+            if not names:
+                print("imagen: list said", str(lj)[:300])
+        except Exception as e:  # noqa: BLE001
+            print("imagen: list failed", str(e)[:200])
     return None
 
 
