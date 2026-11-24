@@ -1525,6 +1525,9 @@ class MapScene:
         return img
 
 
+IMAGEN_OK = [None]
+
+
 def imagen_image(scene, job, tmp, idx):
     """Иллюстрация сцены через Vertex AI Imagen. Бесплатный кредит Google вместо OpenAI;
     любая ошибка — вернём None, и сцена возьмёт соседнюю картину."""
@@ -1537,8 +1540,17 @@ def imagen_image(scene, job, tmp, idx):
         print("imagen: skipped (no GCP_SA_KEY)")
         return None
     loc = os.environ.get("IMAGEN_LOCATION") or os.environ.get("VEO_LOCATION", "us-central1")
-    model = os.environ.get("IMAGEN_MODEL", "imagen-4.0-fast-generate-001")
-    base = "https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s" % (loc, project, loc, model)
+    # Какие модели Imagen включены на проекте, заранее не известно: пробуем по очереди
+    # и запоминаем ту, что ответила.
+    tries = [m for m in [os.environ.get("IMAGEN_MODEL"), IMAGEN_OK[0],
+                         "imagen-4.0-fast-generate-001", "imagen-4.0-generate-001",
+                         "imagen-3.0-fast-generate-001", "imagen-3.0-generate-002",
+                         "imagen-3.0-generate-001", "imagegeneration@006"] if m]
+    seen, models = set(), []
+    for m in tries:
+        if m not in seen:
+            seen.add(m)
+            models.append(m)
     what = str(scene.get("video_prompt") or "").strip()
     cap = str(scene.get("caption") or "").strip()
     era = str(job.get("title") or "").strip()
@@ -1556,22 +1568,28 @@ def imagen_image(scene, job, tmp, idx):
             "parameters": {"sampleCount": 1, "aspectRatio": "9:16",
                            "personGeneration": "allow_adult", "safetySetting": "block_only_high"}}
     hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
-    try:
-        r = requests.post(base + ":predict", json=body, headers=hdr, timeout=180)
-        j = r.json()
-        preds = j.get("predictions") or []
-        b64 = (preds[0] or {}).get("bytesBase64Encoded") if preds else None
-        if not b64:
-            print("imagen: no image", idx, r.status_code, str(j)[:300])
-            return None
-        path = os.path.join(tmp, "imagen_%d.jpg" % idx)
-        with open(path, "wb") as fh:
-            fh.write(base64.b64decode(b64))
-        print("imagen ok", idx, model)
-        return Image.open(path).convert("RGB")
-    except Exception as e:  # noqa: BLE001
-        print("imagen failed", idx, str(e)[:250])
-        return None
+    for model in models:
+        base = ("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s"
+                "/publishers/google/models/%s") % (loc, project, loc, model)
+        try:
+            r = requests.post(base + ":predict", json=body, headers=hdr, timeout=180)
+            j = r.json()
+            preds = j.get("predictions") or []
+            b64 = (preds[0] or {}).get("bytesBase64Encoded") if preds else None
+            if not b64:
+                print("imagen: no image", idx, model, r.status_code, str(j)[:220])
+                if r.status_code in (400, 403, 404):
+                    continue
+                return None
+            path = os.path.join(tmp, "imagen_%d.jpg" % idx)
+            with open(path, "wb") as fh:
+                fh.write(base64.b64decode(b64))
+            IMAGEN_OK[0] = model
+            print("imagen ok", idx, model)
+            return Image.open(path).convert("RGB")
+        except Exception as e:  # noqa: BLE001
+            print("imagen failed", idx, model, str(e)[:200])
+    return None
 
 
 def render_reel(job, out_dir):
