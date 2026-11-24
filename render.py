@@ -1545,7 +1545,7 @@ def imagen_image(scene, job, tmp, idx):
     loc = os.environ.get("IMAGEN_LOCATION") or os.environ.get("VEO_LOCATION", "us-central1")
     # Какие модели Imagen включены на проекте, заранее не известно: пробуем по очереди
     # и запоминаем ту, что ответила.
-    tries = [m for m in [os.environ.get("IMAGEN_MODEL"), IMAGEN_OK[0],
+    tries = [m for m in [os.environ.get("IMAGEN_MODEL"),
                          "imagen-4.0-fast-generate-001", "imagen-4.0-generate-001",
                          "imagen-3.0-fast-generate-001", "imagen-3.0-generate-002",
                          "imagen-3.0-generate-001", "imagegeneration@006"] if m]
@@ -1571,27 +1571,55 @@ def imagen_image(scene, job, tmp, idx):
             "parameters": {"sampleCount": 1, "aspectRatio": "9:16",
                            "personGeneration": "allow_adult", "safetySetting": "block_only_high"}}
     hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
-    for model in models:
-        base = ("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s"
-                "/publishers/google/models/%s") % (loc, project, loc, model)
+    gem_body = {"contents": [{"role": "user", "parts": [{"text": prompt[:1800]}]}],
+                "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}}
+    # Что именно включено на проекте, заранее не известно: перебираем Imagen в регионе,
+    # Imagen на global и генерацию картинок у Gemini, пока что-нибудь не ответит.
+    plan = []
+    for m in models:
+        plan.append(("imagen", loc, m))
+        plan.append(("imagen", "global", m))
+    for m in [os.environ.get("GEMINI_IMAGE_MODEL"), "gemini-2.5-flash-image",
+              "gemini-2.0-flash-preview-image-generation", "gemini-3-pro-image-preview"]:
+        if m:
+            plan.append(("gemini", "global", m))
+            plan.append(("gemini", loc, m))
+    if IMAGEN_OK[0]:
+        plan = [p for p in plan if (p[0], p[1], p[2]) == IMAGEN_OK[0]] + plan
+    for kind, where, model in plan:
+        host = "aiplatform.googleapis.com" if where == "global" else (where + "-aiplatform.googleapis.com")
+        base = "https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s" % (host, project, where, model)
         try:
-            r = requests.post(base + ":predict", json=body, headers=hdr, timeout=180)
-            j = r.json()
-            preds = j.get("predictions") or []
-            b64 = (preds[0] or {}).get("bytesBase64Encoded") if preds else None
+            if kind == "imagen":
+                r = requests.post(base + ":predict", json=body, headers=hdr, timeout=180)
+                j = r.json()
+                preds = j.get("predictions") or []
+                b64 = (preds[0] or {}).get("bytesBase64Encoded") if preds else None
+            else:
+                r = requests.post(base + ":generateContent", json=gem_body, headers=hdr, timeout=180)
+                j = r.json()
+                b64 = None
+                for c in (j.get("candidates") or []):
+                    for p in ((c.get("content") or {}).get("parts") or []):
+                        d = p.get("inlineData") or p.get("inline_data") or {}
+                        if d.get("data"):
+                            b64 = d["data"]
+                            break
+                    if b64:
+                        break
             if not b64:
-                print("imagen: no image", idx, model, r.status_code, str(j)[:220])
+                print("imagen: no image", idx, kind, where, model, r.status_code, str(j)[:200])
                 if r.status_code in (400, 403, 404):
                     continue
                 return None
             path = os.path.join(tmp, "imagen_%d.jpg" % idx)
             with open(path, "wb") as fh:
                 fh.write(base64.b64decode(b64))
-            IMAGEN_OK[0] = model
-            print("imagen ok", idx, model)
+            IMAGEN_OK[0] = (kind, where, model)
+            print("imagen ok", idx, kind, where, model)
             return Image.open(path).convert("RGB")
         except Exception as e:  # noqa: BLE001
-            print("imagen failed", idx, model, str(e)[:200])
+            print("imagen failed", idx, kind, where, model, str(e)[:160])
     if not IMAGEN_OK[1]:
         # Ни одна модель не ответила: один раз выведем, что вообще доступно на проекте.
         IMAGEN_OK[1] = True
