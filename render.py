@@ -1525,6 +1525,55 @@ class MapScene:
         return img
 
 
+def imagen_image(scene, job, tmp, idx):
+    """Иллюстрация сцены через Vertex AI Imagen. Бесплатный кредит Google вместо OpenAI;
+    любая ошибка — вернём None, и сцена возьмёт соседнюю картину."""
+    try:
+        token, project = _gcp_token()
+    except Exception as e:  # noqa: BLE001
+        print("imagen: auth failed", str(e)[:200])
+        return None
+    if not token:
+        print("imagen: skipped (no GCP_SA_KEY)")
+        return None
+    loc = os.environ.get("IMAGEN_LOCATION") or os.environ.get("VEO_LOCATION", "us-central1")
+    model = os.environ.get("IMAGEN_MODEL", "imagen-4.0-fast-generate-001")
+    base = "https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s" % (loc, project, loc, model)
+    what = str(scene.get("video_prompt") or "").strip()
+    cap = str(scene.get("caption") or "").strip()
+    era = str(job.get("title") or "").strip()
+    prompt = ("Historical illustration for a documentary short, realistic oil painting in the style "
+              "of 19th century academic art. ")
+    if what:
+        prompt += what + " "
+    if cap:
+        prompt += "Scene: " + cap[:320] + " "
+    if era:
+        prompt += "Period and place: " + era[:160] + ". "
+    prompt += ("Authentic costumes, weapons, utensils and architecture of that era, no anachronisms. "
+               "Vertical composition. No text, no letters, no captions, no logos, no watermarks.")
+    body = {"instances": [{"prompt": prompt[:1800]}],
+            "parameters": {"sampleCount": 1, "aspectRatio": "9:16",
+                           "personGeneration": "allow_adult", "safetySetting": "block_only_high"}}
+    hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    try:
+        r = requests.post(base + ":predict", json=body, headers=hdr, timeout=180)
+        j = r.json()
+        preds = j.get("predictions") or []
+        b64 = (preds[0] or {}).get("bytesBase64Encoded") if preds else None
+        if not b64:
+            print("imagen: no image", idx, r.status_code, str(j)[:300])
+            return None
+        path = os.path.join(tmp, "imagen_%d.jpg" % idx)
+        with open(path, "wb") as fh:
+            fh.write(base64.b64decode(b64))
+        print("imagen ok", idx, model)
+        return Image.open(path).convert("RGB")
+    except Exception as e:  # noqa: BLE001
+        print("imagen failed", idx, str(e)[:250])
+        return None
+
+
 def render_reel(job, out_dir):
     scenes = job["scenes"][:int(os.environ.get("REEL_SCENES", "22") or 22)]
     tmp = tempfile.mkdtemp()
@@ -1647,6 +1696,9 @@ def render_reel(job, out_dir):
         except Exception as e:  # noqa: BLE001
             print("image failed, scene", si, str(e)[:160])
             img = None
+        if img is None:
+            # 24.11: risuem scenu cherez Vertex AI Imagen - besplatny kredit Google vmesto OpenAI.
+            img = imagen_image(s, job, tmp, si)
         if img is None:
             if bases:
                 bases.append(bases[-1])
