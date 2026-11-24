@@ -2351,7 +2351,7 @@ def wait_public(url, timeout=240):
 
 # ---------------------------------------------------------------- витрина
 
-KEEP_HOURS = 72
+KEEP_HOURS = 6
 
 
 def carry_over(base_out, jid):
