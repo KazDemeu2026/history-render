@@ -1791,7 +1791,7 @@ def render_reel(job, out_dir):
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{VW}x{VH}", "-r", str(FPS), "-i", "-",
         "-i", audio,
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-profile:v", "high", "-pix_fmt", "yuv420p",
         "-af", "apad", "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
         "-shortest", "-movflags", "+faststart", out,
     ]
@@ -2116,7 +2116,7 @@ def story_video(frame, brand, handle, out_path, seed):
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{VW}x{VH}", "-r", str(FPS), "-i", "-",
            "-ss", f"{off:.2f}", "-t", str(STORY_SEC), "-i", music,
            "-filter_complex", f"[1:a]afade=t=in:st=0:d=1,afade=t=out:st={fade}:d=1.5,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100[a]",
-           "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+           "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "24", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", out_path]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     for i in range(n):
@@ -2369,7 +2369,7 @@ def render_montage(job, out_dir):
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{VW}x{VH}", "-r", str(FPS), "-i", "-",
            "-ss", f"{off:.2f}", "-t", f"{total:.2f}", "-i", mpath,
            "-filter_complex", f"[1:a]afade=t=in:st=0:d=0.6,afade=t=out:st={total - 2.2:.2f}:d=2.2,loudnorm=I=-14:TP=-1.2:LRA=11,aresample=44100[a]",
-           "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-profile:v", "high", "-pix_fmt", "yuv420p",
+           "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-profile:v", "high", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     cover_frame = None
@@ -2466,7 +2466,7 @@ def wait_public(url, timeout=240):
 
 # ---------------------------------------------------------------- витрина
 
-KEEP_HOURS = 6
+KEEP_HOURS = 0
 
 
 def carry_over(base_out, jid):
